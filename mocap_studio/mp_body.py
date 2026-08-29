@@ -31,6 +31,19 @@ def _to_unity(landmarks) -> np.ndarray:
     return np.array([[p.x, p.y, p.z] for p in landmarks]) * _CONV
 
 
+def _hand_to_unity(landmarks, w: int, h: int) -> np.ndarray:
+    """Normalized image-space hand landmarks -> Unity-oriented points.
+
+    The holistic task's hand *world* landmarks do not carry the hand
+    model's articulation (fingers read as a generic flat hand), so hand
+    geometry is built from the normalized landmarks instead, scaled by the
+    image size for correct aspect (z is normalized against width).
+    Orientation flips match _to_unity; absolute scale is irrelevant since
+    only directions/angles are consumed downstream.
+    """
+    return np.array([[-p.x * w, -p.y * h, -p.z * w] for p in landmarks])
+
+
 class MediaPipeBodyTracker:
     """Wraps HolisticLandmarker (VIDEO mode) for single-person tracking."""
 
@@ -81,7 +94,8 @@ class MediaPipeBodyTracker:
             pts = _to_unity(res.pose_world_landmarks)
             pose = {name: pts[i] for name, i in MP_POSE.items()}
 
-        left, right = self._assign_hands(res)
+        fh, fw = frame_bgr.shape[:2]
+        left, right = self._assign_hands(res, fw, fh)
 
         # Normalized 2D points for the preview overlay (resolution-free).
         debug2d = []
@@ -93,26 +107,22 @@ class MediaPipeBodyTracker:
         return pose, left, right, debug2d
 
     @staticmethod
-    def _assign_hands(res):
+    def _assign_hands(res, w: int, h: int):
         """Assign detected hands to anatomical sides via pose wrists
         (normalized image coords). Falls back to swapping the task's
-        mirrored labels when no pose is available."""
-        candidates = []  # (normalized landmarks, world landmarks)
-        if res.left_hand_landmarks:
-            candidates.append((res.left_hand_landmarks,
-                               res.left_hand_world_landmarks))
-        if res.right_hand_landmarks:
-            candidates.append((res.right_hand_landmarks,
-                               res.right_hand_world_landmarks))
+        mirrored labels when no pose is available.  Geometry comes from
+        the normalized hand landmarks (see _hand_to_unity)."""
+        candidates = [lm for lm in (res.left_hand_landmarks,
+                                    res.right_hand_landmarks) if lm]
         if not candidates:
             return None, None
 
         if not res.pose_landmarks:
             # labels are mirrored for a non-selfie feed -> swap them
-            left = _to_unity(res.right_hand_world_landmarks) \
-                if res.right_hand_world_landmarks else None
-            right = _to_unity(res.left_hand_world_landmarks) \
-                if res.left_hand_world_landmarks else None
+            left = _hand_to_unity(res.right_hand_landmarks, w, h) \
+                if res.right_hand_landmarks else None
+            right = _hand_to_unity(res.left_hand_landmarks, w, h) \
+                if res.left_hand_landmarks else None
             return left, right
 
         lw = res.pose_landmarks[15]  # left_wrist (normalized)
@@ -125,18 +135,17 @@ class MediaPipeBodyTracker:
             return dl, dr
 
         if len(candidates) == 1:
-            norm, world = candidates[0]
-            dl, dr = dists(norm)
-            hand = _to_unity(world)
+            dl, dr = dists(candidates[0])
+            hand = _hand_to_unity(candidates[0], w, h)
             return (hand, None) if dl <= dr else (None, hand)
 
-        d0 = dists(candidates[0][0])
-        d1 = dists(candidates[1][0])
+        d0 = dists(candidates[0])
+        d1 = dists(candidates[1])
         if d0[0] + d1[1] <= d0[1] + d1[0]:
-            return (_to_unity(candidates[0][1]),
-                    _to_unity(candidates[1][1]))
-        return (_to_unity(candidates[1][1]),
-                _to_unity(candidates[0][1]))
+            return (_hand_to_unity(candidates[0], w, h),
+                    _hand_to_unity(candidates[1], w, h))
+        return (_hand_to_unity(candidates[1], w, h),
+                _hand_to_unity(candidates[0], w, h))
 
     def close(self) -> None:
         self._landmarker.close()
