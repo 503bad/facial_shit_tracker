@@ -22,6 +22,9 @@ from .smoothing import QuaternionSmoother, SmoothedChannels, quat_slerp
 # T-pose reference directions in Unity space.
 _REF_UP = np.array([0.0, 1.0, 0.0])
 _REF_SHOULDER_LINE = np.array([1.0, 0.0, 0.0])   # left shoulder -> right
+_REF_LEG = np.array([0.0, -1.0, 0.0])            # T-pose legs point down
+_REF_FOOT = np.array([0.0, 0.0, 1.0])            # T-pose feet point forward
+_LEG_VIS_MIN = 0.5                               # visibility gate for legs
 _REF_ARM = {"left": np.array([-1.0, 0.0, 0.0]),
             "right": np.array([1.0, 0.0, 0.0])}
 
@@ -173,6 +176,12 @@ class BodyRetargeter:
         self.gate_enabled = True
         self.gate_rad = np.deg2rad(2.0)
         self._gate_held: dict[str, np.ndarray] = {}
+        # Lower body (optional): legs solved with the same swing chain as
+        # the arms, relative to a calibrated neutral so a seated pose reads
+        # as rest.  Only sent when the leg joints are actually visible.
+        self.send_legs = False
+        self._leg_neutral: dict[str, np.ndarray] = {}
+        self._leg_samples: dict[str, int] = {}
 
     def start_calibration(self) -> None:
         """Re-capture the neutral torso pose and, for any hand that is
@@ -186,6 +195,8 @@ class BodyRetargeter:
         self._thumb_rest = [None, None]
         self._head_neutral = None
         self._head_samples = 0
+        self._leg_neutral = {}
+        self._leg_samples = {}
 
     def set_bone_offsets(
             self, offsets: dict[str, tuple[float, float, float]]) -> None:
@@ -221,6 +232,8 @@ class BodyRetargeter:
         if pose is not None:
             rotations.update(self._solve_torso_and_arms(
                 pose, left_hand, right_hand))
+            if self.send_legs:
+                rotations.update(self._solve_legs(pose))
 
         # Smooth every driven rotation.
         for bone, q in rotations.items():
@@ -241,6 +254,47 @@ class BodyRetargeter:
             bones[bone] = (offset, (float(q[0]), float(q[1]),
                                     float(q[2]), float(q[3])))
         return bones
+
+    # ------------------------------------------------------------------
+    def _solve_legs(self, p: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        """UpperLeg -> LowerLeg -> Foot swing chain per side.
+
+        Hips are treated as the (unrotated) parent frame, so leg rotations
+        are relative to the pelvis.  Each joint's rotation is expressed
+        relative to a neutral captured at (re)calibration, so the user's
+        resting seated pose maps to the avatar's rest and only changes
+        (crossing legs, lifting a knee, standing up) are transmitted.
+        """
+        vis = p.get("_vis", {})
+        rot: dict[str, np.ndarray] = {}
+        for side in ("left", "right"):
+            cap = side.capitalize()
+            hip, knee, ankle = (p.get(f"{side}_hip"), p.get(f"{side}_knee"),
+                                p.get(f"{side}_ankle"))
+            if hip is None or knee is None or ankle is None:
+                continue
+            if (vis.get(f"{side}_knee", 1.0) < _LEG_VIS_MIN
+                    or vis.get(f"{side}_ankle", 1.0) < _LEG_VIS_MIN):
+                continue
+            upper_local = quat_from_two_vectors(_REF_LEG, normalize(knee - hip))
+            upper_g = upper_local
+            lower_local = _swing_in_parent(upper_g, _REF_LEG, ankle - knee)
+            lower_g = quat_mul(upper_g, lower_local)
+            chain = [(f"{cap}UpperLeg", upper_local, hip),
+                     (f"{cap}LowerLeg", lower_local, knee)]
+            toe = p.get(f"{side}_foot_index")
+            if toe is not None and vis.get(f"{side}_foot_index", 1.0) >= _LEG_VIS_MIN:
+                foot_local = _swing_in_parent(lower_g, _REF_FOOT, toe - ankle)
+                chain.append((f"{cap}Foot", foot_local, ankle))
+            for bone, q_raw, _ in chain:
+                n = self._leg_samples.get(bone, 0)
+                if n < self._CALIB_FRAMES:
+                    prev = self._leg_neutral.get(bone)
+                    self._leg_neutral[bone] = q_raw.copy() if prev is None                         else quat_slerp(prev, q_raw, 1.0 / (n + 1))
+                    self._leg_samples[bone] = n + 1
+                neutral = self._leg_neutral.get(bone)
+                rot[bone] = quat_mul(q_raw, quat_inv(neutral))                     if neutral is not None else q_raw
+        return rot
 
     # ------------------------------------------------------------------
     def _solve_torso_and_arms(self, p: dict[str, np.ndarray],

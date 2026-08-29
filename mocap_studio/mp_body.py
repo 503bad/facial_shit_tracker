@@ -22,7 +22,14 @@ MP_POSE = {
     "left_elbow": 13, "right_elbow": 14,
     "left_wrist": 15, "right_wrist": 16,
     "left_hip": 23, "right_hip": 24,
+    "left_knee": 25, "right_knee": 26,
+    "left_ankle": 27, "right_ankle": 28,
+    "left_heel": 29, "right_heel": 30,
+    "left_foot_index": 31, "right_foot_index": 32,
 }
+# Landmarks whose visibility is exported (legs may be out of frame).
+_VIS_NAMES = ("left_knee", "right_knee", "left_ankle", "right_ankle",
+              "left_foot_index", "right_foot_index")
 
 _CONV = np.array([-1.0, -1.0, -1.0])
 
@@ -93,6 +100,10 @@ class MediaPipeBodyTracker:
         if res.pose_world_landmarks:
             pts = _to_unity(res.pose_world_landmarks)
             pose = {name: pts[i] for name, i in MP_POSE.items()}
+            # per-landmark visibility for the leg joints (0..1)
+            pose["_vis"] = {
+                name: float(res.pose_world_landmarks[MP_POSE[name]].visibility)
+                for name in _VIS_NAMES}
 
         fh, fw = frame_bgr.shape[:2]
         left, right = self._assign_hands(res, fw, fh)
