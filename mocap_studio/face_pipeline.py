@@ -146,6 +146,10 @@ class FacePipeline:
         qu = np.array([-q[0], -q[1], q[2], q[3]])  # GL -> Unity
         if self.mirror:
             qu = np.array([qu[0], -qu[1], -qu[2], qu[3]])
+        # The camera-facing head frame is rotated 180deg about Y relative
+        # to the avatar frame: conjugating by Ry(180) flips pitch and roll
+        # while keeping yaw (verified against the live avatar).
+        qu = np.array([-qu[0], qu[1], -qu[2], qu[3]])
         self.latest_head_quat = qu
 
         # Eye euler from look blendshapes (receivers mostly use the
