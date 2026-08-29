@@ -33,6 +33,9 @@ class Settings:
     vmc_port: int = 39539
     body_smoothing: float = 0.5          # arm / spine bones
     finger_smoothing: float = 0.6        # finger curl estimation
+    body_gate_enabled: bool = True       # micro-tremor suppression gate
+    body_gate_deg: float = 2.0           # gate threshold in degrees
+    show_camera: bool = True             # camera image in the preview
     body_mode_high_quality: bool = True  # NVAR body pose mode 0 (HQ) vs 1
 
     # Send rate limits (Hz)

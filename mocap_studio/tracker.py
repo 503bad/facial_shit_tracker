@@ -126,10 +126,19 @@ class TrackerWorker:
                                               settings.finger_smoothing)
         self.body_backend = "mediapipe"  # or "nvidia"
         self._preview_enabled = True
+        self._show_camera = settings.show_camera
+        self.body_retargeter.gate_enabled = settings.body_gate_enabled
+        self.body_retargeter.gate_rad = np.deg2rad(settings.body_gate_deg)
 
     # -- GUI-facing controls (thread-safe by value assignment) ----------
     def set_preview_enabled(self, on: bool) -> None:
         self._preview_enabled = on
+
+    def set_show_camera(self, on: bool) -> None:
+        self._show_camera = on
+
+    def set_gate_enabled(self, on: bool) -> None:
+        self.body_retargeter.gate_enabled = on
 
     def request_face_calibration(self) -> None:
         self.face_pipeline.request_calibration()
@@ -235,7 +244,10 @@ class TrackerWorker:
                 last_fid = fid
                 now = time.perf_counter()
                 t = now - t_start
-                overlay = frame.copy() if self._preview_enabled else None
+                overlay = None
+                if self._preview_enabled:
+                    overlay = frame.copy() if self._show_camera \
+                        else np.zeros_like(frame)
 
                 face_found = False
                 if face is not None and ifm is not None:

@@ -93,6 +93,10 @@ class MainWindow(QMainWindow):
         self.preview_check.setChecked(True)
         self.preview_check.toggled.connect(self.worker.set_preview_enabled)
         checks.addWidget(self.preview_check)
+        self.camera_check = QCheckBox("カメラ映像を表示")
+        self.camera_check.setChecked(self.settings.show_camera)
+        self.camera_check.toggled.connect(self._set_show_camera)
+        checks.addWidget(self.camera_check)
         left.addLayout(checks)
         layout.addLayout(left, 2)
 
@@ -156,6 +160,10 @@ class MainWindow(QMainWindow):
         body_form.addRow(SmoothingSlider(
             "指の平滑化", self.settings.finger_smoothing,
             lambda v: self._set_smoothing("finger_smoothing", v)))
+        self.gate_check = QCheckBox("震え抑制ゲート（静止時の微振動をカット）")
+        self.gate_check.setChecked(self.settings.body_gate_enabled)
+        self.gate_check.toggled.connect(self._set_gate)
+        body_form.addRow(self.gate_check)
         vrm_row = QHBoxLayout()
         self.vrm_label = QLabel("（未読込：内蔵デフォルト使用）")
         self.vrm_label.setWordWrap(True)
@@ -199,6 +207,14 @@ class MainWindow(QMainWindow):
 
     def _set_mirror(self, on: bool) -> None:
         self.settings.mirror_tracking = on
+
+    def _set_show_camera(self, on: bool) -> None:
+        self.settings.show_camera = on
+        self.worker.set_show_camera(on)
+
+    def _set_gate(self, on: bool) -> None:
+        self.settings.body_gate_enabled = on
+        self.worker.set_gate_enabled(on)
 
     def _load_vrm_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(

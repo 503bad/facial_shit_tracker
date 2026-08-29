@@ -167,6 +167,12 @@ class BodyRetargeter:
         self._head_neutral: np.ndarray | None = None
         self._head_samples = 0
         self._NECK_SHARE = 0.35
+        # Micro-tremor gate: each bone trails its target by up to gate_rad,
+        # so sub-threshold jitter produces zero output motion while larger
+        # movements pass through without popping.
+        self.gate_enabled = True
+        self.gate_rad = np.deg2rad(2.0)
+        self._gate_held: dict[str, np.ndarray] = {}
 
     def start_calibration(self) -> None:
         """Re-capture the neutral torso pose and, for any hand that is
@@ -222,6 +228,7 @@ class BodyRetargeter:
 
         rotations.update(self._solve_head())
         rotations.update(self._solve_fingers(left_hand, right_hand, t))
+        rotations = self._apply_gate(rotations)
 
         bones: dict[str, tuple[tuple, tuple]] = {}
         for bone, offset in self.bone_offsets.items():
@@ -411,6 +418,27 @@ class BodyRetargeter:
             if hands[side] is not None:
                 self._solve_thumb(side, hi, hands[side], rot, t)
         return rot
+
+    # ------------------------------------------------------------------
+    def _apply_gate(self, rotations: dict[str, np.ndarray]
+                    ) -> dict[str, np.ndarray]:
+        if not self.gate_enabled:
+            self._gate_held.clear()
+            return rotations
+        out: dict[str, np.ndarray] = {}
+        for bone, q in rotations.items():
+            held = self._gate_held.get(bone)
+            if held is None:
+                out[bone] = q
+            else:
+                dot = abs(float(np.dot(held, q)))
+                ang = 2.0 * np.arccos(np.clip(dot, 0.0, 1.0))
+                if ang <= self.gate_rad:
+                    out[bone] = held
+                else:
+                    out[bone] = quat_slerp(q, held, self.gate_rad / ang)
+            self._gate_held[bone] = out[bone]
+        return out
 
     # ------------------------------------------------------------------
     def set_head_pose(self, quat_unity: np.ndarray) -> None:
