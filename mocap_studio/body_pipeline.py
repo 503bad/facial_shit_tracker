@@ -77,6 +77,11 @@ DEFAULT_BONE_OFFSETS: dict[str, tuple[float, float, float]] = {
     "RightLittleDistal": (-0.0185, 0.0, 0.0),
 }
 
+# Bones owned by the face tracker (iFacialMocap side); never sent over VMC
+# unless the body pipeline actually computes them.
+_FACE_DRIVEN_BONES = frozenset(
+    {"Neck", "Head", "LeftEye", "RightEye", "Jaw"})
+
 _FINGERS = ("Thumb", "Index", "Middle", "Ring", "Little")
 _SEGMENTS = ("Proximal", "Intermediate", "Distal")
 # MediaPipe hand landmark chains per finger: [base, mcp, pip/ip, dip, tip]
@@ -210,6 +215,11 @@ class BodyRetargeter:
 
         bones: dict[str, tuple[tuple, tuple]] = {}
         for bone, offset in self.bone_offsets.items():
+            if bone in _FACE_DRIVEN_BONES and bone not in rotations:
+                # Not driven by the body tracker: sending identity would
+                # override the iFacialMocap-driven head/eyes at the
+                # receiver, pinning the head to face forward.
+                continue
             q = rotations.get(bone, IDENTITY)
             bones[bone] = (offset, (float(q[0]), float(q[1]),
                                     float(q[2]), float(q[3])))
