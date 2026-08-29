@@ -87,6 +87,7 @@ _MP_FINGER_CHAIN = {
     "Little": [0, 17, 18, 19, 20],
 }
 _MAX_CURL_RAD = np.deg2rad(100.0)
+_MAX_SPLAY_RAD = np.deg2rad(32.0)
 
 
 class BodyRetargeter:
@@ -117,6 +118,12 @@ class BodyRetargeter:
         self._rest_angles = np.zeros(30)
         self._rest_counts = [0, 0]
         self._FINGER_GAIN = 1.3
+        # Splay (finger spread): 10 channels = 2 hands x 5 fingers,
+        # signed angle in the palm plane toward the thumb side.
+        self._splay_smoother = SmoothedChannels(finger_strength)
+        self._splay_angles = np.zeros(10)
+        self._rest_splay = np.zeros(10)
+        self.splay_sign = {"Left": 1.0, "Right": -1.0}
 
     def start_calibration(self) -> None:
         """Re-capture the neutral torso pose and relaxed finger angles."""
@@ -124,6 +131,7 @@ class BodyRetargeter:
         self._chest_samples = 0
         self._rest_angles = np.zeros(30)
         self._rest_counts = [0, 0]
+        self._rest_splay = np.zeros(10)
 
     def set_bone_offsets(
             self, offsets: dict[str, tuple[float, float, float]]) -> None:
@@ -136,6 +144,7 @@ class BodyRetargeter:
         for s in self._rot_smoothers.values():
             s.set_strength(body)
         self._finger_smoother.set_strength(finger)
+        self._splay_smoother.set_strength(finger)
 
     def _smooth(self, bone: str, quat: np.ndarray, t: float) -> np.ndarray:
         sm = self._rot_smoothers.get(bone)
@@ -274,10 +283,18 @@ class BodyRetargeter:
     # ------------------------------------------------------------------
     def _solve_fingers(self, left_hand, right_hand, t: float):
         angles = self._finger_angles.copy()
+        splay = self._splay_angles.copy()
         for hi, (side, lm) in enumerate((("Left", left_hand),
                                          ("Right", right_hand))):
             if lm is None:
                 continue
+            # Hand-plane frame for splay measurement: along-hand axis and
+            # thumb-side axis (little_mcp -> index_mcp, orthogonalized).
+            wrist, index_mcp, middle_mcp, little_mcp = (
+                lm[0], lm[5], lm[9], lm[17])
+            hand_dir = normalize(middle_mcp - wrist)
+            t_side = np.asarray(index_mcp - little_mcp, dtype=np.float64)
+            t_side = normalize(t_side - hand_dir * np.dot(t_side, hand_dir))
             for fi, finger in enumerate(_FINGERS):
                 chain = _MP_FINGER_CHAIN[finger]
                 pts = lm[chain]
@@ -286,19 +303,32 @@ class BodyRetargeter:
                     b = pts[si + 2] - pts[si + 1]
                     ang = angle_between(a, b)
                     angles[hi * 15 + fi * 3 + si] = min(ang, _MAX_CURL_RAD)
+                # Splay: signed in-plane angle of the proximal segment
+                # (mcp -> pip) relative to the along-hand axis.
+                d = pts[2] - pts[1]
+                splay[hi * 5 + fi] = float(np.arctan2(
+                    np.dot(d, t_side), max(np.dot(d, hand_dir), 1e-6)))
             # Rest-angle calibration: the relaxed hand at start defines the
             # per-joint zero point (the thumb in particular has a large
-            # constant structural angle that must not read as curl).
+            # constant structural angle that must not read as curl, and
+            # every finger has a natural rest splay).
             if self._rest_counts[hi] < self._CALIB_FRAMES:
                 n = self._rest_counts[hi]
                 sl = slice(hi * 15, hi * 15 + 15)
+                sp = slice(hi * 5, hi * 5 + 5)
                 self._rest_angles[sl] = (
                     self._rest_angles[sl] * n + angles[sl]) / (n + 1)
+                self._rest_splay[sp] = (
+                    self._rest_splay[sp] * n + splay[sp]) / (n + 1)
                 self._rest_counts[hi] = n + 1
         self._finger_angles = angles
+        self._splay_angles = splay
         effective = np.clip((angles - self._rest_angles) * self._FINGER_GAIN,
                             0.0, _MAX_CURL_RAD)
         smoothed = self._finger_smoother.apply(effective, t)
+        eff_splay = np.clip(splay - self._rest_splay,
+                            -_MAX_SPLAY_RAD, _MAX_SPLAY_RAD)
+        smoothed_splay = self._splay_smoother.apply(eff_splay, t)
 
         rot: dict[str, np.ndarray] = {}
         for hi, side in enumerate(("Left", "Right")):
@@ -309,8 +339,15 @@ class BodyRetargeter:
                         axis = self.thumb_axis[side]
                     else:
                         axis = np.array([0.0, 0.0, self.curl_sign[side]])
-                    rot[f"{side}{finger}{seg}"] = quat_from_axis_angle(
-                        axis, ang)
+                    q = quat_from_axis_angle(axis, ang)
+                    if si == 0:
+                        # Spread is applied at the proximal joint only,
+                        # rotating in the palm plane (local Y).
+                        sp = float(smoothed_splay[hi * 5 + fi])
+                        q_splay = quat_from_axis_angle(
+                            np.array([0.0, self.splay_sign[side], 0.0]), sp)
+                        q = quat_mul(q_splay, q)
+                    rot[f"{side}{finger}{seg}"] = q
         return rot
 
     def set_grip(self, side: str, curl01: float) -> None:

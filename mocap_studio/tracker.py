@@ -198,10 +198,16 @@ class TrackerWorker:
                     pose_pts = None
                     lhand = rhand = None
                     if body_mp is not None:
-                        pose_pts, lhand, rhand = body_mp.process(
+                        pose_pts, lhand, rhand, debug2d = body_mp.process(
                             frame, int(t * 1000))
-                        if overlay is not None:
-                            pass  # world landmarks aren't in pixel space
+                        if overlay is not None and debug2d:
+                            oh, ow = overlay.shape[:2]
+                            for x, y, kind in debug2d:
+                                color = (0, 128, 255) if kind == 0 \
+                                    else (255, 200, 0)
+                                cv2.circle(overlay,
+                                           (int(x * ow), int(y * oh)),
+                                           2, color, -1)
                     elif body_nv is not None:
                         kp3d, kp2d, conf = body_nv.process(frame)
                         if float(np.mean(conf)) > 0.2:

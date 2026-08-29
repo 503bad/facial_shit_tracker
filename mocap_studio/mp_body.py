@@ -82,7 +82,15 @@ class MediaPipeBodyTracker:
             pose = {name: pts[i] for name, i in MP_POSE.items()}
 
         left, right = self._assign_hands(res)
-        return pose, left, right
+
+        # Normalized 2D points for the preview overlay (resolution-free).
+        debug2d = []
+        if res.pose_landmarks:
+            debug2d += [(p.x, p.y, 0) for p in res.pose_landmarks]
+        for hand_lm in (res.left_hand_landmarks, res.right_hand_landmarks):
+            if hand_lm:
+                debug2d += [(p.x, p.y, 1) for p in hand_lm]
+        return pose, left, right, debug2d
 
     @staticmethod
     def _assign_hands(res):
