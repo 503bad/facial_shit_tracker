@@ -14,8 +14,9 @@ from __future__ import annotations
 import numpy as np
 
 from .retarget import (IDENTITY, angle_between, frame_rotation, normalize,
-                       quat_from_axis_angle, quat_from_axes, quat_inv,
-                       quat_mul, twist_angle)
+                       quat_from_axis_angle, quat_from_axes,
+                       quat_from_two_vectors, quat_inv, quat_mul,
+                       twist_angle)
 from .smoothing import QuaternionSmoother, SmoothedChannels, quat_slerp
 
 # T-pose reference directions in Unity space.
@@ -89,6 +90,15 @@ _MP_FINGER_CHAIN = {
 _MAX_CURL_RAD = np.deg2rad(100.0)
 _MAX_SPLAY_RAD = np.deg2rad(32.0)
 
+# Fallback thumb rest directions (avatar hand-local frame) used only until
+# the auto rest-calibration captures the real relaxed hand.
+_DEFAULT_THUMB_REST = {
+    "Left": np.array([[-0.5, -0.2, 0.84], [-0.6, -0.15, 0.78],
+                      [-0.6, -0.15, 0.78]]),
+    "Right": np.array([[0.5, -0.2, 0.84], [0.6, -0.15, 0.78],
+                       [0.6, -0.15, 0.78]]),
+}
+
 
 class BodyRetargeter:
     def __init__(self, body_strength: float = 0.5,
@@ -124,6 +134,12 @@ class BodyRetargeter:
         self._splay_angles = np.zeros(10)
         self._rest_splay = np.zeros(10)
         self.splay_sign = {"Left": 1.0, "Right": -1.0}
+        # Thumb: direction-based 3DOF retarget (the saddle joint can't be
+        # represented by a fixed rotation axis).  Rest directions per hand,
+        # 3 segments each, expressed in the avatar hand-local frame.
+        self._thumb_rest: list[np.ndarray | None] = [None, None]
+        self._thumb_smoothers: dict[str, QuaternionSmoother] = {}
+        self._finger_strength = finger_strength
 
     def start_calibration(self) -> None:
         """Re-capture the neutral torso pose and relaxed finger angles."""
@@ -132,6 +148,7 @@ class BodyRetargeter:
         self._rest_angles = np.zeros(30)
         self._rest_counts = [0, 0]
         self._rest_splay = np.zeros(10)
+        self._thumb_rest = [None, None]
 
     def set_bone_offsets(
             self, offsets: dict[str, tuple[float, float, float]]) -> None:
@@ -145,6 +162,9 @@ class BodyRetargeter:
             s.set_strength(body)
         self._finger_smoother.set_strength(finger)
         self._splay_smoother.set_strength(finger)
+        self._finger_strength = finger
+        for s in self._thumb_smoothers.values():
+            s.set_strength(finger)
 
     def _smooth(self, bone: str, quat: np.ndarray, t: float) -> np.ndarray:
         sm = self._rot_smoothers.get(bone)
@@ -331,8 +351,11 @@ class BodyRetargeter:
         smoothed_splay = self._splay_smoother.apply(eff_splay, t)
 
         rot: dict[str, np.ndarray] = {}
+        hands = {"Left": left_hand, "Right": right_hand}
         for hi, side in enumerate(("Left", "Right")):
             for fi, finger in enumerate(_FINGERS):
+                if finger == "Thumb" and hands[side] is not None:
+                    continue  # direction-based solve below
                 for si, seg in enumerate(_SEGMENTS):
                     ang = float(smoothed[hi * 15 + fi * 3 + si])
                     if finger == "Thumb":
@@ -340,7 +363,7 @@ class BodyRetargeter:
                     else:
                         axis = np.array([0.0, 0.0, self.curl_sign[side]])
                     q = quat_from_axis_angle(axis, ang)
-                    if si == 0:
+                    if si == 0 and finger != "Thumb":
                         # Spread is applied at the proximal joint only,
                         # rotating in the palm plane (local Y).
                         sp = float(smoothed_splay[hi * 5 + fi])
@@ -348,7 +371,66 @@ class BodyRetargeter:
                             np.array([0.0, self.splay_sign[side], 0.0]), sp)
                         q = quat_mul(q_splay, q)
                     rot[f"{side}{finger}{seg}"] = q
+            if hands[side] is not None:
+                self._solve_thumb(side, hi, hands[side], rot, t)
         return rot
+
+    # ------------------------------------------------------------------
+    def _solve_thumb(self, side: str, hi: int, lm: np.ndarray,
+                     rot: dict[str, np.ndarray], t: float) -> None:
+        """Direction-based 3DOF thumb retarget.
+
+        The thumb's saddle joint (opposition, thumbs-up, spreading) can't be
+        expressed with a fixed rotation axis, so each segment direction is
+        measured in the hand's own frame, mapped into the avatar hand-local
+        frame, and applied as a chained swing from the rest direction."""
+        ref = _REF_ARM[side.lower()]
+        wrist, index_mcp, middle_mcp, little_mcp = (
+            lm[0], lm[5], lm[9], lm[17])
+        e1 = normalize(np.asarray(middle_mcp - wrist, dtype=np.float64))
+        if side == "Left":
+            pn = np.cross(index_mcp - wrist, little_mcp - wrist)
+        else:
+            pn = np.cross(little_mcp - wrist, index_mcp - wrist)
+        e2 = normalize(pn - e1 * np.dot(pn, e1))
+        e3 = np.cross(e1, e2)
+        a1 = ref
+        a2 = np.array([0.0, -1.0, 0.0])
+        a3 = np.cross(a1, a2)
+
+        def to_avatar(d):
+            d = np.asarray(d, dtype=np.float64)
+            return normalize(a1 * np.dot(d, e1) + a2 * np.dot(d, e2)
+                             + a3 * np.dot(d, e3))
+
+        dirs = np.array([to_avatar(lm[i + 1] - lm[i]) for i in (1, 2, 3)])
+
+        if self._rest_counts[hi] <= self._CALIB_FRAMES:
+            prev = self._thumb_rest[hi]
+            if prev is None:
+                self._thumb_rest[hi] = dirs.copy()
+            else:
+                n = max(self._rest_counts[hi], 1)
+                mixed = (prev * n + dirs) / (n + 1)
+                self._thumb_rest[hi] = np.array(
+                    [normalize(v) for v in mixed])
+
+        rest = self._thumb_rest[hi]
+        if rest is None:
+            rest = _DEFAULT_THUMB_REST[side]
+
+        g = IDENTITY.copy()
+        for seg, d_rest, d_cur in zip(_SEGMENTS, rest, dirs):
+            d_in_parent = _rotate_vec(quat_inv(g), d_cur)
+            q = quat_from_two_vectors(normalize(d_rest), d_in_parent)
+            name = f"{side}Thumb{seg}"
+            sm = self._thumb_smoothers.get(name)
+            if sm is None:
+                sm = QuaternionSmoother(self._finger_strength)
+                self._thumb_smoothers[name] = sm
+            q = sm.apply(q, t)
+            rot[name] = q
+            g = quat_mul(g, q)
 
     def set_grip(self, side: str, curl01: float) -> None:
         """Fallback for backends without hand landmarks: set a uniform
