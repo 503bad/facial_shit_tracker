@@ -24,6 +24,10 @@ from .vmc_sender import VmcSender
 # avatar space): (-x, y, z), plus mm -> m if magnitudes suggest mm.
 _NV_CONV = np.array([-1.0, 1.0, 1.0])
 
+# Set to a path to log raw head-pose data for debugging; None disables.
+import os as _os
+_DEBUG_HEAD_LOG = _os.environ.get("MOCAP_HEAD_LOG") or None
+
 
 class _AsyncBody:
     """Runs the (CPU-heavy) body backend on its own thread with
@@ -245,6 +249,17 @@ class TrackerWorker:
                         bs, head_e, head_p, reye, leye = \
                             self.face_pipeline.process(expr, pose_q, trans, t)
                         ifm.send(bs, head_e, head_p, reye, leye)
+                        if _DEBUG_HEAD_LOG and int(t * 10) % 5 == 0:
+                            with open(_DEBUG_HEAD_LOG, "a",
+                                      encoding="utf-8") as f:
+                                f.write(
+                                    f"t={t:6.1f} raw_q="
+                                    f"({pose_q[0]:+.3f},{pose_q[1]:+.3f},"
+                                    f"{pose_q[2]:+.3f},{pose_q[3]:+.3f}) "
+                                    f"trans=({trans[0]:+.3f},{trans[1]:+.3f},"
+                                    f"{trans[2]:+.3f}) euler_deg="
+                                    f"({head_e[0]:+6.1f},{head_e[1]:+6.1f},"
+                                    f"{head_e[2]:+6.1f})\n")
                     if overlay is not None and found:
                         for x, y in lm:
                             cv2.circle(overlay, (int(x), int(y)), 1,

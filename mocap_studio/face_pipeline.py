@@ -132,7 +132,9 @@ class FacePipeline:
 
         q = self.head_rot_smoother.apply(pose_quat, t)
         head_euler = _quat_to_unity_euler_deg(q)
-        pos = self.head_pos_smoother.apply(translation, t)
+        # NvAR PoseTranslation is in centimeters; iFacialMocap expects
+        # meters (a raw value puts the head ~80 m away at the receiver).
+        pos = self.head_pos_smoother.apply(translation * 0.01, t)
         head_pos = (float(pos[0]), float(pos[1]), float(pos[2]))
         if self.mirror:
             head_euler = (head_euler[0], -head_euler[1], -head_euler[2])
