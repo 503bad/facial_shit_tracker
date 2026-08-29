@@ -25,6 +25,57 @@ from .vmc_sender import VmcSender
 _NV_CONV = np.array([-1.0, 1.0, 1.0])
 
 
+class _AsyncBody:
+    """Runs the (CPU-heavy) body backend on its own thread with
+    latest-frame-wins semantics so the face pipeline keeps full FPS."""
+
+    def __init__(self, fn) -> None:
+        self._fn = fn
+        self._lock = threading.Lock()
+        self._frame = None
+        self._ts = 0
+        self._result = None
+        self._seq = 0
+        self.error: Exception | None = None
+        self._stop = threading.Event()
+        self._event = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def submit(self, frame, ts_ms: int) -> None:
+        with self._lock:
+            self._frame = frame
+            self._ts = ts_ms
+        self._event.set()
+
+    def latest(self):
+        with self._lock:
+            return self._result, self._seq
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            if not self._event.wait(0.2):
+                continue
+            self._event.clear()
+            with self._lock:
+                frame, ts = self._frame, self._ts
+            if frame is None:
+                continue
+            try:
+                res = self._fn(frame, ts)
+            except Exception as e:  # surfaced by the main loop
+                self.error = e
+                break
+            with self._lock:
+                self._result = res
+                self._seq += 1
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._event.set()
+        self._thread.join(timeout=3.0)
+
+
 def _mirror_body(pose, lhand, rhand):
     """Mirror tracked points: flip X and swap anatomical sides."""
 
@@ -119,6 +170,7 @@ class TrackerWorker:
         face = None
         body_nv = None
         body_mp = None
+        body_async = None
         ifm = None
         vmc = None
         try:
@@ -158,11 +210,18 @@ class TrackerWorker:
                 vmc = VmcSender(s.vmc_host, s.vmc_port)
 
             self._set_status(info="トラッキング中")
+            body_async = None
+            if body_mp is not None:
+                body_async = _AsyncBody(body_mp.process)
             last_fid = -1
             t_start = time.perf_counter()
             fps_n, fps_t = 0, time.perf_counter()
             last_face_send = 0.0
             last_body_send = 0.0
+            last_body_seq = -1
+            last_debug2d = None
+            body_found = False
+            l_found = r_found = False
 
             while not self._stop.is_set():
                 frame, fid = camera.latest()
@@ -191,18 +250,21 @@ class TrackerWorker:
                             cv2.circle(overlay, (int(x), int(y)), 1,
                                        (0, 255, 128), -1)
 
-                body_found = False
-                l_found = r_found = False
                 if vmc is not None:
                     vmc.set_destination(s.vmc_host, s.vmc_port)
-                    pose_pts = None
-                    lhand = rhand = None
-                    if body_mp is not None:
-                        pose_pts, lhand, rhand, debug2d = body_mp.process(
-                            frame, int(t * 1000))
-                        if overlay is not None and debug2d:
+                    new_body = None
+                    if body_async is not None:
+                        if body_async.error is not None:
+                            raise body_async.error
+                        body_async.submit(frame, int(t * 1000))
+                        res, seq = body_async.latest()
+                        if res is not None and seq != last_body_seq:
+                            last_body_seq = seq
+                            pose_pts, lhand, rhand, last_debug2d = res
+                            new_body = (pose_pts, lhand, rhand)
+                        if overlay is not None and last_debug2d:
                             oh, ow = overlay.shape[:2]
-                            for x, y, kind in debug2d:
+                            for x, y, kind in last_debug2d:
                                 color = (0, 128, 255) if kind == 0 \
                                     else (255, 200, 0)
                                 cv2.circle(overlay,
@@ -210,25 +272,30 @@ class TrackerWorker:
                                            2, color, -1)
                     elif body_nv is not None:
                         kp3d, kp2d, conf = body_nv.process(frame)
+                        pose_pts = None
                         if float(np.mean(conf)) > 0.2:
                             pose_pts = self._nv_pose_points(kp3d)
                             self._nv_grip(kp3d, s.mirror_tracking)
+                        new_body = (pose_pts, None, None)
                         if overlay is not None:
                             for (x, y), c in zip(kp2d, conf):
                                 if c > 0.3:
                                     cv2.circle(overlay, (int(x), int(y)), 3,
                                                (0, 128, 255), -1)
-                    if s.mirror_tracking:
-                        pose_pts, lhand, rhand = _mirror_body(
-                            pose_pts, lhand, rhand)
-                    body_found = pose_pts is not None
-                    l_found, r_found = lhand is not None, rhand is not None
-                    if body_found and now - last_body_send >= 1.0 / max(
-                            1, s.body_send_rate):
-                        last_body_send = now
-                        bones = self.body_retargeter.process(
-                            pose_pts, lhand, rhand, t)
-                        vmc.send_frame(bones)
+                    if new_body is not None:
+                        pose_pts, lhand, rhand = new_body
+                        if s.mirror_tracking:
+                            pose_pts, lhand, rhand = _mirror_body(
+                                pose_pts, lhand, rhand)
+                        body_found = pose_pts is not None
+                        l_found = lhand is not None
+                        r_found = rhand is not None
+                        if body_found and now - last_body_send >= 1.0 / max(
+                                1, s.body_send_rate):
+                            last_body_send = now
+                            bones = self.body_retargeter.process(
+                                pose_pts, lhand, rhand, t)
+                            vmc.send_frame(bones)
 
                 fps_n += 1
                 if now - fps_t >= 1.0:
@@ -242,6 +309,8 @@ class TrackerWorker:
             self._set_status(error=traceback.format_exc(),
                              info="エラーで停止しました")
         finally:
+            if body_async is not None:
+                body_async.stop()
             for obj, closer in ((face, "destroy"), (body_nv, "destroy"),
                                 (body_mp, "close"), (ifm, "close")):
                 if obj is not None:

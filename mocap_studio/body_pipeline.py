@@ -90,13 +90,24 @@ _MP_FINGER_CHAIN = {
 _MAX_CURL_RAD = np.deg2rad(100.0)
 _MAX_SPLAY_RAD = np.deg2rad(32.0)
 
-# Fallback thumb rest directions (avatar hand-local frame) used only until
-# the auto rest-calibration captures the real relaxed hand.
+# Canonical relaxed-hand rest values.  These are the default zero points;
+# the calibration button re-captures them from the user's actual hand.
+# Curl rests per finger segment (radians), _FINGERS order.
+_CANON_CURL_REST = np.array([
+    0.35, 0.25, 0.15,   # thumb (used only in the axis-based fallback)
+    0.15, 0.12, 0.08,   # index
+    0.15, 0.12, 0.08,   # middle
+    0.15, 0.12, 0.08,   # ring
+    0.15, 0.12, 0.08,   # little
+])
+# In-palm splay rests (radians, positive = toward thumb side).
+_CANON_SPLAY_REST = np.array([0.75, 0.10, 0.0, -0.12, -0.30])
+# Thumb segment rest directions in the avatar hand-local frame.
 _DEFAULT_THUMB_REST = {
-    "Left": np.array([[-0.5, -0.2, 0.84], [-0.6, -0.15, 0.78],
-                      [-0.6, -0.15, 0.78]]),
-    "Right": np.array([[0.5, -0.2, 0.84], [0.6, -0.15, 0.78],
-                       [0.6, -0.15, 0.78]]),
+    "Left": np.array([[-0.68, -0.30, 0.66], [-0.58, -0.25, 0.77],
+                      [-0.55, -0.25, 0.80]]),
+    "Right": np.array([[0.68, -0.30, 0.66], [0.58, -0.25, 0.77],
+                       [0.55, -0.25, 0.80]]),
 }
 
 
@@ -125,14 +136,18 @@ class BodyRetargeter:
         self._CALIB_FRAMES = 40
         self._chest_neutral: np.ndarray | None = None
         self._chest_samples = 0
-        self._rest_angles = np.zeros(30)
-        self._rest_counts = [0, 0]
+        # Finger rest starts from canonical relaxed-hand values; capturing
+        # from "first frames the hand is visible" is unreliable because the
+        # hand usually appears mid-gesture.  Only the calibration button
+        # re-captures (start_calibration).
+        self._rest_angles = np.tile(_CANON_CURL_REST, 2)
+        self._rest_splay = np.tile(_CANON_SPLAY_REST, 2)
+        self._rest_counts = [self._CALIB_FRAMES, self._CALIB_FRAMES]
         self._FINGER_GAIN = 1.3
         # Splay (finger spread): 10 channels = 2 hands x 5 fingers,
         # signed angle in the palm plane toward the thumb side.
         self._splay_smoother = SmoothedChannels(finger_strength)
         self._splay_angles = np.zeros(10)
-        self._rest_splay = np.zeros(10)
         self.splay_sign = {"Left": 1.0, "Right": -1.0}
         # Thumb: direction-based 3DOF retarget (the saddle joint can't be
         # represented by a fixed rotation axis).  Rest directions per hand,
@@ -142,12 +157,14 @@ class BodyRetargeter:
         self._finger_strength = finger_strength
 
     def start_calibration(self) -> None:
-        """Re-capture the neutral torso pose and relaxed finger angles."""
+        """Re-capture the neutral torso pose and, for any hand that is
+        visible during the capture window, the relaxed finger rest angles.
+        The user should sit relaxed with open hands in view."""
         self._chest_neutral = None
         self._chest_samples = 0
-        self._rest_angles = np.zeros(30)
+        self._rest_angles = np.tile(_CANON_CURL_REST, 2)
+        self._rest_splay = np.tile(_CANON_SPLAY_REST, 2)
         self._rest_counts = [0, 0]
-        self._rest_splay = np.zeros(10)
         self._thumb_rest = [None, None]
 
     def set_bone_offsets(

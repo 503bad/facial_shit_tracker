@@ -78,7 +78,8 @@ class MainWindow(QMainWindow):
         self.calib_btn = QPushButton("顔キャリブレーション（真顔で押す）")
         self.calib_btn.clicked.connect(self.worker.request_face_calibration)
         row.addWidget(self.calib_btn)
-        self.body_calib_btn = QPushButton("姿勢キャリブレーション（楽な姿勢で押す）")
+        self.body_calib_btn = QPushButton(
+            "姿勢・指キャリブレーション（楽な姿勢・手をパーにして押す）")
         self.body_calib_btn.clicked.connect(
             self.worker.request_body_calibration)
         row.addWidget(self.body_calib_btn)

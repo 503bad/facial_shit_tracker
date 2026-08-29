@@ -61,12 +61,12 @@ class MediaPipeBodyTracker:
         wrists — the task's own left/right labels follow the mirrored-selfie
         convention and are wrong for a plain webcam feed.
         """
-        # Downscale for speed: landmark output is normalized/world-space,
-        # so tracking quality barely changes but CPU cost drops a lot.
+        # Moderate downscale: cuts CPU cost while keeping the hand ROI crop
+        # sharp enough for reliable finger landmarks on a fist.
         h, w = frame_bgr.shape[:2]
-        if w > 640:
-            scale = 640.0 / w
-            frame_bgr = cv2.resize(frame_bgr, (640, int(h * scale)),
+        if w > 960:
+            scale = 960.0 / w
+            frame_bgr = cv2.resize(frame_bgr, (960, int(h * scale)),
                                    interpolation=cv2.INTER_AREA)
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         img = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
