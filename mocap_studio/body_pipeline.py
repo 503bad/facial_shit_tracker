@@ -160,6 +160,13 @@ class BodyRetargeter:
         self._thumb_rest: list[np.ndarray | None] = [None, None]
         self._thumb_smoothers: dict[str, QuaternionSmoother] = {}
         self._finger_strength = finger_strength
+        # Head pose fed from the face tracker (Unity space, mirror applied),
+        # sent over VMC split across Neck/Head for receivers whose body
+        # tracking owns the whole skeleton.
+        self._head_quat: np.ndarray | None = None
+        self._head_neutral: np.ndarray | None = None
+        self._head_samples = 0
+        self._NECK_SHARE = 0.35
 
     def start_calibration(self) -> None:
         """Re-capture the neutral torso pose and, for any hand that is
@@ -171,6 +178,8 @@ class BodyRetargeter:
         self._rest_splay = np.tile(_CANON_SPLAY_REST, 2)
         self._rest_counts = [0, 0]
         self._thumb_rest = [None, None]
+        self._head_neutral = None
+        self._head_samples = 0
 
     def set_bone_offsets(
             self, offsets: dict[str, tuple[float, float, float]]) -> None:
@@ -211,6 +220,7 @@ class BodyRetargeter:
         for bone, q in rotations.items():
             rotations[bone] = self._smooth(bone, q, t)
 
+        rotations.update(self._solve_head())
         rotations.update(self._solve_fingers(left_hand, right_hand, t))
 
         bones: dict[str, tuple[tuple, tuple]] = {}
@@ -401,6 +411,30 @@ class BodyRetargeter:
             if hands[side] is not None:
                 self._solve_thumb(side, hi, hands[side], rot, t)
         return rot
+
+    # ------------------------------------------------------------------
+    def set_head_pose(self, quat_unity: np.ndarray) -> None:
+        """Feed the face tracker's head quaternion (Unity space, already
+        smoothed and mirrored on the face side)."""
+        self._head_quat = np.asarray(quat_unity, dtype=np.float64)
+
+    def _solve_head(self) -> dict[str, np.ndarray]:
+        if self._head_quat is None:
+            return {}
+        q = self._head_quat
+        if self._head_samples < self._CALIB_FRAMES:
+            if self._head_neutral is None:
+                self._head_neutral = q.copy()
+            else:
+                self._head_neutral = quat_slerp(
+                    self._head_neutral, q, 1.0 / (self._head_samples + 1))
+            self._head_samples += 1
+        if self._head_neutral is None:
+            return {}
+        rel = quat_mul(q, quat_inv(self._head_neutral))
+        neck = quat_slerp(IDENTITY, rel, self._NECK_SHARE)
+        head = quat_mul(quat_inv(neck), rel)
+        return {"Neck": neck, "Head": head}
 
     # ------------------------------------------------------------------
     def _solve_thumb(self, side: str, hi: int, lm: np.ndarray,

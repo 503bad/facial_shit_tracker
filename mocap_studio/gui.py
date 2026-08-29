@@ -168,7 +168,8 @@ class MainWindow(QMainWindow):
         right.addWidget(body_group)
 
         right.addStretch(1)
-        note = QLabel("※ 顔・頭は iFacialMocap 側、体・指は VMC 側で送信。\n"
+        note = QLabel("※ 表情は iFacialMocap 側、体・指・首・頭は VMC 側で送信\n"
+                      "（頭回転は iFacialMocap にも同時送信）。\n"
                       "受信アプリ側で両プロトコルの受信を有効にしてください。")
         note.setStyleSheet("color:#888;")
         right.addWidget(note)

@@ -101,6 +101,10 @@ class FacePipeline:
         self._pending_calibration = False
         self.latest_expr: dict[str, float] = {}
         self.mirror = True
+        # Unity-space head quaternion (mirror applied), for driving the
+        # Neck/Head bones over VMC as well (receivers whose body tracking
+        # owns the skeleton ignore the iFM head rotation).
+        self.latest_head_quat = np.array([0.0, 0.0, 0.0, 1.0])
 
     def request_calibration(self) -> None:
         self._pending_calibration = True
@@ -139,6 +143,10 @@ class FacePipeline:
         if self.mirror:
             head_euler = (head_euler[0], -head_euler[1], -head_euler[2])
             head_pos = (-head_pos[0], head_pos[1], head_pos[2])
+        qu = np.array([-q[0], -q[1], q[2], q[3]])  # GL -> Unity
+        if self.mirror:
+            qu = np.array([qu[0], -qu[1], -qu[2], qu[3]])
+        self.latest_head_quat = qu
 
         # Eye euler from look blendshapes (receivers mostly use the
         # blendshapes; these keep full compatibility).  X: down positive.

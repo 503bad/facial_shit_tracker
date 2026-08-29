@@ -249,6 +249,10 @@ class TrackerWorker:
                         bs, head_e, head_p, reye, leye = \
                             self.face_pipeline.process(expr, pose_q, trans, t)
                         ifm.send(bs, head_e, head_p, reye, leye)
+                        # Also drive Neck/Head over VMC (receivers whose
+                        # body tracking owns the skeleton ignore iFM head).
+                        self.body_retargeter.set_head_pose(
+                            self.face_pipeline.latest_head_quat)
                         if _DEBUG_HEAD_LOG and int(t * 10) % 5 == 0:
                             with open(_DEBUG_HEAD_LOG, "a",
                                       encoding="utf-8") as f:
