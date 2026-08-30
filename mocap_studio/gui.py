@@ -188,6 +188,10 @@ class MainWindow(QMainWindow):
         self.gate_check.setChecked(self.settings.body_gate_enabled)
         self.gate_check.toggled.connect(self._set_gate)
         body_form.addRow(self.gate_check)
+        self.legs_check = QCheckBox("下半身も送信（脚が映っている時のみ動作）")
+        self.legs_check.setChecked(self.settings.send_legs)
+        self.legs_check.toggled.connect(self._set_send_legs)
+        body_form.addRow(self.legs_check)
         vrm_row = QHBoxLayout()
         self.vrm_label = QLabel("（未読込：内蔵デフォルト使用）")
         self.vrm_label.setWordWrap(True)
@@ -239,6 +243,10 @@ class MainWindow(QMainWindow):
     def _set_gate(self, on: bool) -> None:
         self.settings.body_gate_enabled = on
         self.worker.set_gate_enabled(on)
+
+    def _set_send_legs(self, on: bool) -> None:
+        self.settings.send_legs = on
+        self.worker.set_send_legs(on)
 
     def _load_vrm_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(

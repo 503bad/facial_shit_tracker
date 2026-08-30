@@ -22,6 +22,9 @@ from .smoothing import QuaternionSmoother, SmoothedChannels, quat_slerp
 # T-pose reference directions in Unity space.
 _REF_UP = np.array([0.0, 1.0, 0.0])
 _REF_SHOULDER_LINE = np.array([1.0, 0.0, 0.0])   # left shoulder -> right
+_REF_LEG = np.array([0.0, -1.0, 0.0])            # T-pose legs point down
+_REF_FOOT = np.array([0.0, 0.0, 1.0])            # T-pose feet point forward
+_LEG_VIS_MIN = 0.5                               # visibility gate for legs
 _REF_ARM = {"left": np.array([-1.0, 0.0, 0.0]),
             "right": np.array([1.0, 0.0, 0.0])}
 
@@ -177,6 +180,24 @@ class BodyRetargeter:
         self.gate_enabled = True
         self.gate_rad = np.deg2rad(2.0)
         self._gate_held: dict[str, np.ndarray] = {}
+        # Lower body (optional): legs solved with the same swing chain as
+        # the arms, relative to a calibrated neutral so a seated pose reads
+        # as rest.  Only sent when the leg joints are actually visible.
+        self.send_legs = False
+        self._leg_neutral: dict[str, np.ndarray] = {}
+        # Pelvis (Hips) is pinned to identity in seated mode; with legs on
+        # it is driven from the hip line so whole-body turns go into Hips
+        # (and the legs follow) instead of overloading the spine.
+        self._hips_neutral: np.ndarray | None = None
+        self._hips_samples = 0
+        self._hips_raw = IDENTITY.copy()
+        # Pelvis translation (legs on): image-space hip centre relative to
+        # the calibrated neutral, scaled to metres by the torso length.
+        self._hips_img_neutral: np.ndarray | None = None
+        self._hips_img_samples = 0
+        self._hips_delta = np.zeros(3)
+        self._hips_pos_smoother = SmoothedChannels(body_strength)
+        self._leg_samples: dict[str, int] = {}
 
     def start_calibration(self) -> None:
         """Re-capture the neutral torso pose and, for any hand that is
@@ -190,6 +211,12 @@ class BodyRetargeter:
         self._thumb_rest = [None, None]
         self._head_neutral = None
         self._head_samples = 0
+        self._leg_neutral = {}
+        self._leg_samples = {}
+        self._hips_neutral = None
+        self._hips_samples = 0
+        self._hips_img_neutral = None
+        self._hips_img_samples = 0
 
     def set_bone_offsets(
             self, offsets: dict[str, tuple[float, float, float]]) -> None:
@@ -203,6 +230,7 @@ class BodyRetargeter:
             s.set_strength(body)
         self._finger_smoother.set_strength(finger)
         self._splay_smoother.set_strength(finger)
+        self._hips_pos_smoother.set_strength(body)
         self._finger_strength = finger
         for s in self._thumb_smoothers.values():
             s.set_strength(finger)
@@ -222,9 +250,13 @@ class BodyRetargeter:
         """Build the full VMC bone dict {name: (pos, quat)}."""
         rotations: dict[str, np.ndarray] = {}
 
+        hips_delta = np.zeros(3)
         if pose is not None:
             rotations.update(self._solve_torso_and_arms(
                 pose, left_hand, right_hand))
+            if self.send_legs:
+                rotations.update(self._solve_legs(pose))
+                hips_delta = self._solve_hips_translation(pose, t)
 
         # Smooth every driven rotation.
         for bone, q in rotations.items():
@@ -244,9 +276,94 @@ class BodyRetargeter:
                 # receiver, pinning the head to face forward.
                 continue
             q = rotations.get(bone, IDENTITY)
+            if bone == "Hips":
+                offset = (offset[0] + float(hips_delta[0]),
+                          offset[1] + float(hips_delta[1]),
+                          offset[2] + float(hips_delta[2]))
             bones[bone] = (offset, (float(q[0]), float(q[1]),
                                     float(q[2]), float(q[3])))
         return bones
+
+    def _solve_hips_translation(self, p: dict, t: float) -> np.ndarray:
+        """Pelvis translation from the image-space hip centre.
+
+        metres-per-normalized-unit = world torso length / image torso
+        length, so the estimate is independent of camera distance.  Depth
+        is not estimated (image-only).  Frozen while the hips are not
+        actually visible (MediaPipe still emits guessed positions).
+        """
+        img = p.get("_img")
+        vis = p.get("_vis", {})
+        if (not img or vis.get("left_hip", 1.0) < _LEG_VIS_MIN
+                or vis.get("right_hip", 1.0) < _LEG_VIS_MIN):
+            return self._hips_delta
+        aspect = float(img.get("aspect", 16 / 9))
+        hc = np.array(img["hip_center"], dtype=np.float64)
+        sc = np.array(img["shoulder_center"], dtype=np.float64)
+        torso_img = float(np.hypot((sc[0] - hc[0]) * aspect, sc[1] - hc[1]))
+        hips_w = (p["left_hip"] + p["right_hip"]) / 2.0
+        sh_w = (p["left_shoulder"] + p["right_shoulder"]) / 2.0
+        torso_m = float(np.linalg.norm(sh_w - hips_w))
+        if torso_img < 1e-4 or torso_m < 1e-4:
+            return self._hips_delta
+        if self._hips_img_samples < self._CALIB_FRAMES:
+            n = self._hips_img_samples
+            if self._hips_img_neutral is None:
+                self._hips_img_neutral = hc.copy()
+            else:
+                self._hips_img_neutral = (
+                    self._hips_img_neutral * n + hc) / (n + 1)
+            self._hips_img_samples = n + 1
+        if self._hips_img_neutral is None:
+            return self._hips_delta
+        scale = torso_m / torso_img
+        d = hc - self._hips_img_neutral
+        # image x right -> Unity -x ; image y down -> Unity -y
+        raw = np.array([-d[0] * aspect * scale, -d[1] * scale, 0.0])
+        self._hips_delta = self._hips_pos_smoother.apply(raw, t)
+        return self._hips_delta
+
+    # ------------------------------------------------------------------
+    def _solve_legs(self, p: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        """UpperLeg -> LowerLeg -> Foot swing chain per side.
+
+        Hips are treated as the (unrotated) parent frame, so leg rotations
+        are relative to the pelvis.  Each joint's rotation is expressed
+        relative to a neutral captured at (re)calibration, so the user's
+        resting seated pose maps to the avatar's rest and only changes
+        (crossing legs, lifting a knee, standing up) are transmitted.
+        """
+        vis = p.get("_vis", {})
+        rot: dict[str, np.ndarray] = {}
+        for side in ("left", "right"):
+            cap = side.capitalize()
+            hip, knee, ankle = (p.get(f"{side}_hip"), p.get(f"{side}_knee"),
+                                p.get(f"{side}_ankle"))
+            if hip is None or knee is None or ankle is None:
+                continue
+            if (vis.get(f"{side}_knee", 1.0) < _LEG_VIS_MIN
+                    or vis.get(f"{side}_ankle", 1.0) < _LEG_VIS_MIN):
+                continue
+            hips_g = self._hips_raw
+            upper_local = _swing_in_parent(hips_g, _REF_LEG, knee - hip)
+            upper_g = quat_mul(hips_g, upper_local)
+            lower_local = _swing_in_parent(upper_g, _REF_LEG, ankle - knee)
+            lower_g = quat_mul(upper_g, lower_local)
+            chain = [(f"{cap}UpperLeg", upper_local, hip),
+                     (f"{cap}LowerLeg", lower_local, knee)]
+            toe = p.get(f"{side}_foot_index")
+            if toe is not None and vis.get(f"{side}_foot_index", 1.0) >= _LEG_VIS_MIN:
+                foot_local = _swing_in_parent(lower_g, _REF_FOOT, toe - ankle)
+                chain.append((f"{cap}Foot", foot_local, ankle))
+            for bone, q_raw, _ in chain:
+                n = self._leg_samples.get(bone, 0)
+                if n < self._CALIB_FRAMES:
+                    prev = self._leg_neutral.get(bone)
+                    self._leg_neutral[bone] = q_raw.copy() if prev is None                         else quat_slerp(prev, q_raw, 1.0 / (n + 1))
+                    self._leg_samples[bone] = n + 1
+                neutral = self._leg_neutral.get(bone)
+                rot[bone] = quat_mul(q_raw, quat_inv(neutral))                     if neutral is not None else q_raw
+        return rot
 
     # ------------------------------------------------------------------
     def _solve_torso_and_arms(self, p: dict[str, np.ndarray],
@@ -276,11 +393,38 @@ class BodyRetargeter:
         chest_out = quat_mul(chest_raw, quat_inv(self._chest_neutral)) \
             if self._chest_neutral is not None else IDENTITY.copy()
 
+        torso_rel = chest_out
+        self._hips_raw = IDENTITY.copy()
+        vis = p.get("_vis", {})
+        hips_seen = (vis.get("left_hip", 1.0) >= _LEG_VIS_MIN
+                     and vis.get("right_hip", 1.0) >= _LEG_VIS_MIN)
+        if self.send_legs and hips_seen:
+            # Pelvis frame: hip line (exact, gives yaw + real pelvic roll)
+            # with WORLD up as the secondary axis - a torso lean is a
+            # spine bend and must not tilt the pelvis (and the legs).
+            hip_line = normalize(rh - lh)
+            hips_raw = frame_rotation((_REF_SHOULDER_LINE, _REF_UP),
+                                      (hip_line, _REF_UP))
+            if self._hips_samples < self._CALIB_FRAMES:
+                if self._hips_neutral is None:
+                    self._hips_neutral = hips_raw.copy()
+                else:
+                    self._hips_neutral = quat_slerp(
+                        self._hips_neutral, hips_raw,
+                        1.0 / (self._hips_samples + 1))
+                self._hips_samples += 1
+            hips_out = quat_mul(hips_raw, quat_inv(self._hips_neutral))                 if self._hips_neutral is not None else IDENTITY.copy()
+            rot["Hips"] = hips_out
+            self._hips_raw = hips_raw
+            # Spine/Chest carry only the shoulders' rotation relative to
+            # the pelvis; a whole-body turn lands in Hips instead.
+            torso_rel = quat_mul(quat_inv(hips_out), chest_out)
+
         # Distribute torso rotation over Spine and Chest (half each, as a
         # quaternion "square root" via slerp from identity).
-        half = quat_slerp(IDENTITY, chest_out, 0.5)
+        half = quat_slerp(IDENTITY, torso_rel, 0.5)
         rot["Spine"] = half
-        rot["Chest"] = quat_mul(quat_inv(half), chest_out)
+        rot["Chest"] = quat_mul(quat_inv(half), torso_rel)
         # Arm-swing math stays in the RAW (measured) chest frame so arms
         # remain correct relative to the real torso.
         chest_global = chest_raw

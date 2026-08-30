@@ -22,7 +22,15 @@ MP_POSE = {
     "left_elbow": 13, "right_elbow": 14,
     "left_wrist": 15, "right_wrist": 16,
     "left_hip": 23, "right_hip": 24,
+    "left_knee": 25, "right_knee": 26,
+    "left_ankle": 27, "right_ankle": 28,
+    "left_heel": 29, "right_heel": 30,
+    "left_foot_index": 31, "right_foot_index": 32,
 }
+# Landmarks whose visibility is exported (legs may be out of frame).
+_VIS_NAMES = ("left_hip", "right_hip",
+              "left_knee", "right_knee", "left_ankle", "right_ankle",
+              "left_foot_index", "right_foot_index")
 
 _CONV = np.array([-1.0, -1.0, -1.0])
 
@@ -93,6 +101,23 @@ class MediaPipeBodyTracker:
         if res.pose_world_landmarks:
             pts = _to_unity(res.pose_world_landmarks)
             pose = {name: pts[i] for name, i in MP_POSE.items()}
+            # per-landmark visibility for the leg joints (0..1)
+            pose["_vis"] = {
+                name: float(res.pose_world_landmarks[MP_POSE[name]].visibility)
+                for name in _VIS_NAMES}
+            if res.pose_landmarks:
+                # Image-space torso anchors (normalized) for pelvis
+                # translation: world landmarks are hip-centred and carry
+                # no absolute position.
+                lm = res.pose_landmarks
+                fh0, fw0 = frame_bgr.shape[:2]
+                pose["_img"] = {
+                    "hip_center": ((lm[23].x + lm[24].x) / 2,
+                                   (lm[23].y + lm[24].y) / 2),
+                    "shoulder_center": ((lm[11].x + lm[12].x) / 2,
+                                        (lm[11].y + lm[12].y) / 2),
+                    "aspect": fw0 / fh0,
+                }
 
         fh, fw = frame_bgr.shape[:2]
         left, right = self._assign_hands(res, fw, fh)
@@ -100,7 +125,9 @@ class MediaPipeBodyTracker:
         # Normalized 2D points for the preview overlay (resolution-free).
         debug2d = []
         if res.pose_landmarks:
-            debug2d += [(p.x, p.y, 0) for p in res.pose_landmarks]
+            # kind 0 = pose (visible), kind 2 = pose but low visibility
+            debug2d += [(p.x, p.y, 0 if p.visibility >= 0.5 else 2)
+                        for p in res.pose_landmarks]
         for hand_lm in (res.left_hand_landmarks, res.right_hand_landmarks):
             if hand_lm:
                 debug2d += [(p.x, p.y, 1) for p in hand_lm]

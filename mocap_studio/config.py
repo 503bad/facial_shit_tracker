@@ -38,6 +38,7 @@ class Settings:
     body_gate_enabled: bool = True       # micro-tremor suppression gate
     body_gate_deg: float = 2.0           # gate threshold in degrees
     show_camera: bool = True             # camera image in the preview
+    send_legs: bool = False              # lower-body (legs) over VMC
     body_mode_high_quality: bool = True  # NVAR body pose mode 0 (HQ) vs 1
 
     # Send rate limits (Hz)

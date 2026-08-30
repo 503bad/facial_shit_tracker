@@ -101,10 +101,19 @@ def _mirror_body(pose, lhand, rhand):
     new_pose = None
     if pose is not None:
         new_pose = {}
-        for k, v in pose.items():
-            nk = k.replace("left_", "@").replace(
+
+        def swap(name):
+            return name.replace("left_", "@").replace(
                 "right_", "left_").replace("@", "right_")
-            new_pose[nk] = flip(v)
+
+        for k, v in pose.items():
+            if k == "_vis":
+                new_pose[k] = {swap(n): c for n, c in v.items()}
+            elif k == "_img":
+                new_pose[k] = {n: ((1.0 - c[0], c[1]) if isinstance(c, tuple)
+                                   else c) for n, c in v.items()}
+            else:
+                new_pose[swap(k)] = flip(v)
     new_l = flip(rhand) if rhand is not None else None
     new_r = flip(lhand) if lhand is not None else None
     return new_pose, new_l, new_r
@@ -139,6 +148,7 @@ class TrackerWorker:
         self._show_camera = settings.show_camera
         self.body_retargeter.gate_enabled = settings.body_gate_enabled
         self.body_retargeter.gate_rad = np.deg2rad(settings.body_gate_deg)
+        self.body_retargeter.send_legs = settings.send_legs
 
     # -- GUI-facing controls (thread-safe by value assignment) ----------
     def set_preview_enabled(self, on: bool) -> None:
@@ -149,6 +159,9 @@ class TrackerWorker:
 
     def set_gate_enabled(self, on: bool) -> None:
         self.body_retargeter.gate_enabled = on
+
+    def set_send_legs(self, on: bool) -> None:
+        self.body_retargeter.send_legs = on
 
     def request_face_calibration(self) -> None:
         self.face_pipeline.request_calibration()
@@ -353,8 +366,8 @@ class TrackerWorker:
                         if overlay is not None and last_debug2d:
                             oh, ow = overlay.shape[:2]
                             for x, y, kind in last_debug2d:
-                                color = (0, 128, 255) if kind == 0 \
-                                    else (255, 200, 0)
+                                color = {0: (0, 128, 255), 1: (255, 200, 0),
+                                         2: (0, 0, 255)}[kind]  # red = guessed
                                 cv2.circle(overlay,
                                            (int(x * ow), int(y * oh)),
                                            2, color, -1)
