@@ -128,7 +128,9 @@ def _load_libs():
     if not os.path.isdir(SDK_DIR):
         raise NvArError(
             f"NVIDIA AR SDK が見つかりません: {SDK_DIR}\n"
-            "SDKをインストールするか NV_AR_SDK_PATH を設定してください。")
+            "フェイシャルトラッキングには NVIDIA AR SDK（Redistributable）が必要です。\n"
+            "https://www.nvidia.com/ja-jp/geforce/broadcasting/broadcast-sdk/resources/\n"
+            "からインストールするか、別の場所なら環境変数 NV_AR_SDK_PATH を設定してください。")
     os.add_dll_directory(SDK_DIR)
     _nvcv = ctypes.CDLL(os.path.join(SDK_DIR, "NVCVImage.dll"))
     _nvar = ctypes.CDLL(os.path.join(SDK_DIR, "nvARPose.dll"))

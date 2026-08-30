@@ -15,18 +15,27 @@
   （`C:\Program Files\NVIDIA Corporation\NVIDIA AR SDK`）
 - Python 3.12
 
-## セットアップ
+## セットアップ（配布版はこちら）
+1. **NVIDIA AR SDK** をインストール（RTX GPU 必須）
+   https://www.nvidia.com/ja-jp/geforce/broadcasting/broadcast-sdk/resources/ の
+   "AR SDK" Redistributable
+2. **Python 3.10〜3.12** をインストール（"Add python.exe to PATH" にチェック）
+   https://www.python.org/downloads/windows/
+3. **`setup.bat` をダブルクリック** — 上記2つの有無を確認し（無ければURLを開いて案内）、
+   このフォルダ内に仮想環境 `.venv` を作って必要なライブラリを自動インストールし、
+   完了後にアプリを起動します。
+
+MediaPipeモデル（`mocap_studio/models/*.task`）は同梱済み。
+2回目以降は `MocapStudio.bat` をダブルクリックで起動（`.venv` を使用）。
+エラーを確認したいときは `MocapStudio_debug.bat`（コンソール表示）。
+
+開発者向け（仮想環境を使わない場合）:
 ```
 pip install -r requirements.txt
-```
-MediaPipeモデル（`mocap_studio/models/*.task`）は同梱済み。
-
-## 起動
-```
-cd E:\develop\track_tools
 python -m mocap_studio
 ```
 
+## 使い方
 1. カメラ・解像度を選び「▶ トラッキング開始」
 2. 受信側（Warudo / VSeeFace 等）で
    - iFacialMocap受信を有効化（このPCのIP、ポート49983）
