@@ -287,7 +287,10 @@ class TrackerWorker:
                 if vmc is not None:
                     sinks["bones"] = vmc.send_frame
                     sinks["blend"] = vmc.send_blendshapes
-                interp = OutputInterpolator(s.output_fps, sinks)
+                interp = OutputInterpolator(
+                    s.output_fps, sinks,
+                    lookahead=(s.output_lookahead_sec
+                               if s.output_refine else 0.0))
 
             self._set_status(info="トラッキング中")
             body_async = None

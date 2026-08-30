@@ -107,6 +107,19 @@ class MainWindow(QMainWindow):
         self.interp_combo.setCurrentIndex(max(0, idx))
         self.interp_combo.setToolTip("変更はトラッキング再開時に反映されます")
         checks.addWidget(self.interp_combo)
+        checks.addWidget(QLabel("先読み補正:"))
+        self.refine_combo = QComboBox()
+        self.refine_combo.addItem("OFF", 0.0)
+        for sec in (0.10, 0.15, 0.20, 0.30):
+            self.refine_combo.addItem(f"{sec:.2f}秒遅延", sec)
+        cur = (round(self.settings.output_lookahead_sec, 2)
+               if self.settings.output_refine else 0.0)
+        idx = self.refine_combo.findData(cur)
+        self.refine_combo.setCurrentIndex(max(0, idx))
+        self.refine_combo.setToolTip(
+            "補間出力がONの時のみ有効。指定秒だけ遅らせ、前後のサンプルから"
+            "外れ値を除いて平滑化します。変更はトラッキング再開時に反映")
+        checks.addWidget(self.refine_combo)
         left.addLayout(checks)
         layout.addLayout(left, 2)
 
@@ -279,6 +292,10 @@ class MainWindow(QMainWindow):
         s.face_output = self.face_output_combo.currentData() or "ifm"
         fps = int(self.interp_combo.currentData() or 0)
         s.output_interp = fps > 0
+        la = float(self.refine_combo.currentData() or 0.0)
+        s.output_refine = la > 0
+        if la > 0:
+            s.output_lookahead_sec = la
         if fps > 0:
             s.output_fps = fps
         s.eye_mode = self.eye_mode_combo.currentData() or "bone"

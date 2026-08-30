@@ -48,6 +48,11 @@ class Settings:
     # a small adaptive delay (no change to tracking when off).
     output_interp: bool = False
     output_fps: int = 60
+    # Look-ahead refinement (needs output_interp): delay output by
+    # output_lookahead_sec and robustly average the samples around each
+    # frame - removes spikes/jitter at the cost of that latency.
+    output_refine: bool = False
+    output_lookahead_sec: float = 0.3
 
     # Optional VRM model for accurate bone bind offsets in VMC output
     vrm_model_path: str = ""
