@@ -1,5 +1,5 @@
-numpy>=2.0
-opencv-python>=4.10
-python-osc>=1.9
-PySide6>=6.7
-mediapipe>=0.10.30
+numpy>=2.0,<3
+opencv-python>=4.10,<5
+python-osc>=1.9,<2
+PySide6>=6.7,<7
+mediapipe>=0.10.30,<2
