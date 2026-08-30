@@ -342,10 +342,12 @@ class BodyRetargeter:
         torso_rel = chest_out
         self._hips_raw = IDENTITY.copy()
         if self.send_legs:
-            # Pelvis frame: hip line (exact) + torso up (orthogonalized).
+            # Pelvis frame: hip line (exact, gives yaw + real pelvic roll)
+            # with WORLD up as the secondary axis - a torso lean is a
+            # spine bend and must not tilt the pelvis (and the legs).
             hip_line = normalize(rh - lh)
             hips_raw = frame_rotation((_REF_SHOULDER_LINE, _REF_UP),
-                                      (hip_line, torso_up))
+                                      (hip_line, _REF_UP))
             if self._hips_samples < self._CALIB_FRAMES:
                 if self._hips_neutral is None:
                     self._hips_neutral = hips_raw.copy()
