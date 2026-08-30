@@ -61,3 +61,10 @@ docs/               調査したプロトコル仕様メモ
 ## 平滑化について
 強度0%はフィルタ無効（生値）、100%は最強。表情・頭・体は One Euro /
 slerpの適応フィルタなので、強くしても速い動きの遅延は比較的小さいままです。
+
+## 配布パッケージの作成（開発者向け）
+`make_release.bat` をダブルクリックすると `release\MocapStudio-v<version>\` に
+配布に必要なファイルだけ（`mocap_studio/`＋同梱モデル、`docs/`、各 bat、
+`requirements.txt`、`README.md`）を集め、同名の ZIP も生成します。
+`.git`・`.venv`・`settings.json`・VRM・`__pycache__` は含まれません。
+バージョンは `mocap_studio/__init__.py` の `__version__` から取ります。
