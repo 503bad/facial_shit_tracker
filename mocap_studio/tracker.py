@@ -17,8 +17,18 @@ from .body_pipeline import BodyRetargeter
 from .camera import Camera
 from .config import Settings
 from .face_pipeline import FacePipeline
-from .ifm_sender import IfmSender
+from .ifm_sender import IfmSender, ifm_to_arkit
+from .interp import OutputInterpolator
 from .vmc_sender import VmcSender
+from .retarget import quat_from_axis_angle, quat_mul
+
+
+def _eye_quat(pitch_deg: float, yaw_deg: float) -> np.ndarray:
+    """Unity eye-bone local rotation: X = look down (+), Y = look right (+),
+    composed in Unity's Euler order (q = Qy * Qx)."""
+    qx = quat_from_axis_angle(np.array([1.0, 0.0, 0.0]), np.deg2rad(pitch_deg))
+    qy = quat_from_axis_angle(np.array([0.0, 1.0, 0.0]), np.deg2rad(yaw_deg))
+    return quat_mul(qy, qx)
 
 # NVIDIA keypoint -> Unity conversion (X-right/Y-up/Z-toward-camera ->
 # avatar space): (-x, y, z), plus mm -> m if magnitudes suggest mm.
@@ -186,6 +196,7 @@ class TrackerWorker:
         body_async = None
         ifm = None
         vmc = None
+        interp = None
         try:
             self._set_status(running=True, error=None,
                              info="カメラを起動中...")
@@ -208,7 +219,8 @@ class TrackerWorker:
                                       "（初回は数十秒かかります）...")
                 from .nvar import FaceExpressionEstimator
                 face = FaceExpressionEstimator(w, h)
-                ifm = IfmSender(s.face_host, s.face_port)
+                if s.face_output in ("ifm", "both"):
+                    ifm = IfmSender(s.face_host, s.face_port)
 
             if s.body_enabled:
                 if self.body_backend == "nvidia":
@@ -221,6 +233,20 @@ class TrackerWorker:
                     from .mp_body import MediaPipeBodyTracker
                     body_mp = MediaPipeBodyTracker()
                 vmc = VmcSender(s.vmc_host, s.vmc_port)
+            if vmc is None and face is not None and s.face_output != "ifm":
+                # Perfect Sync over VMC without body tracking
+                vmc = VmcSender(s.vmc_host, s.vmc_port)
+
+            if s.output_interp:
+                # Output-stage resampler: senders are called from its own
+                # thread at output_fps; the tracking loop only pushes samples.
+                sinks = {}
+                if ifm is not None:
+                    sinks["ifm"] = ifm.send
+                if vmc is not None:
+                    sinks["bones"] = vmc.send_frame
+                    sinks["blend"] = vmc.send_blendshapes
+                interp = OutputInterpolator(s.output_fps, sinks)
 
             self._set_status(info="トラッキング中")
             body_async = None
@@ -250,8 +276,9 @@ class TrackerWorker:
                         else np.zeros_like(frame)
 
                 face_found = False
-                if face is not None and ifm is not None:
-                    ifm.set_destination(s.face_host, s.face_port)
+                if face is not None:
+                    if ifm is not None:
+                        ifm.set_destination(s.face_host, s.face_port)
                     self.face_pipeline.mirror = s.mirror_tracking
                     found, expr, pose_q, trans, lm = face.process(frame)
                     face_found = bool(found)
@@ -260,7 +287,37 @@ class TrackerWorker:
                         last_face_send = now
                         bs, head_e, head_p, reye, leye = \
                             self.face_pipeline.process(expr, pose_q, trans, t)
-                        ifm.send(bs, head_e, head_p, reye, leye)
+                        if ifm is not None:
+                            if interp is not None:
+                                interp.push("ifm", now,
+                                            (bs, head_e, head_p, reye, leye))
+                            else:
+                                ifm.send(bs, head_e, head_p, reye, leye)
+                        if vmc is not None and s.face_output != "ifm":
+                            vmc.set_destination(s.vmc_host, s.vmc_port)
+                            vals = {ifm_to_arkit(k): v for k, v in bs.items()}
+                            if s.eye_mode == "bone":
+                                for k in vals:
+                                    if k.startswith("eyeLook"):
+                                        vals[k] = 0.0
+                            if interp is not None:
+                                interp.push("blend", now, vals)
+                            else:
+                                vmc.send_blendshapes(vals)
+                            if s.eye_mode in ("bone", "both"):
+                                self.body_retargeter.set_eye_rotations(
+                                    _eye_quat(leye[0], leye[1]),
+                                    _eye_quat(reye[0], reye[1]))
+                            else:
+                                self.body_retargeter.set_eye_rotations(
+                                    None, None)
+                            if body_async is None and body_nv is None:
+                                # no body frames: send the head chain alone
+                                fb = self.body_retargeter.face_bones_frame()
+                                if interp is not None:
+                                    interp.push("bones", now, fb)
+                                else:
+                                    vmc.send_frame(fb)
                         # Also drive Neck/Head over VMC (receivers whose
                         # body tracking owns the skeleton ignore iFM head).
                         self.body_retargeter.set_head_pose(
@@ -326,7 +383,10 @@ class TrackerWorker:
                             last_body_send = now
                             bones = self.body_retargeter.process(
                                 pose_pts, lhand, rhand, t)
-                            vmc.send_frame(bones)
+                            if interp is not None:
+                                interp.push("bones", now, bones)
+                            else:
+                                vmc.send_frame(bones)
 
                 fps_n += 1
                 if now - fps_t >= 1.0:
@@ -340,6 +400,8 @@ class TrackerWorker:
             self._set_status(error=traceback.format_exc(),
                              info="エラーで停止しました")
         finally:
+            if interp is not None:
+                interp.stop()
             if body_async is not None:
                 body_async.stop()
             for obj, closer in ((face, "destroy"), (body_nv, "destroy"),

@@ -97,6 +97,16 @@ class MainWindow(QMainWindow):
         self.camera_check.setChecked(self.settings.show_camera)
         self.camera_check.toggled.connect(self._set_show_camera)
         checks.addWidget(self.camera_check)
+        checks.addWidget(QLabel("補間出力:"))
+        self.interp_combo = QComboBox()
+        self.interp_combo.addItem("OFF（直接送信）", 0)
+        self.interp_combo.addItem("30FPS（僅かな遅延）", 30)
+        self.interp_combo.addItem("60FPS（僅かな遅延）", 60)
+        cur = self.settings.output_fps if self.settings.output_interp else 0
+        idx = self.interp_combo.findData(cur)
+        self.interp_combo.setCurrentIndex(max(0, idx))
+        self.interp_combo.setToolTip("変更はトラッキング再開時に反映されます")
+        checks.addWidget(self.interp_combo)
         left.addLayout(checks)
         layout.addLayout(left, 2)
 
@@ -130,6 +140,20 @@ class MainWindow(QMainWindow):
         self.face_port.setRange(1, 65535)
         self.face_port.setValue(self.settings.face_port)
         face_form.addRow("ポート", self.face_port)
+        self.face_output_combo = QComboBox()
+        self.face_output_combo.addItem("iFacialMocap形式（Warudo/VSeeFace等）", "ifm")
+        self.face_output_combo.addItem("VMC Blend/Val（VRM4U/UE5等）", "vmc")
+        self.face_output_combo.addItem("両方に送信", "both")
+        idx = self.face_output_combo.findData(self.settings.face_output)
+        self.face_output_combo.setCurrentIndex(max(0, idx))
+        face_form.addRow("表情の送信先", self.face_output_combo)
+        self.eye_mode_combo = QComboBox()
+        self.eye_mode_combo.addItem("ボーン（LeftEye/RightEye）", "bone")
+        self.eye_mode_combo.addItem("モーフ（eyeLook*）", "morph")
+        self.eye_mode_combo.addItem("両方", "both")
+        idx = self.eye_mode_combo.findData(self.settings.eye_mode)
+        self.eye_mode_combo.setCurrentIndex(max(0, idx))
+        face_form.addRow("眼球（VMC送信時）", self.eye_mode_combo)
         face_form.addRow(SmoothingSlider(
             "表情の平滑化", self.settings.face_smoothing,
             lambda v: self._set_smoothing("face_smoothing", v)))
@@ -244,6 +268,12 @@ class MainWindow(QMainWindow):
         s.face_enabled = self.face_group.isChecked()
         s.face_host = self.face_host.text().strip() or "127.0.0.1"
         s.face_port = self.face_port.value()
+        s.face_output = self.face_output_combo.currentData() or "ifm"
+        fps = int(self.interp_combo.currentData() or 0)
+        s.output_interp = fps > 0
+        if fps > 0:
+            s.output_fps = fps
+        s.eye_mode = self.eye_mode_combo.currentData() or "bone"
         s.body_enabled = self.body_group.isChecked()
         s.vmc_host = self.vmc_host.text().strip() or "127.0.0.1"
         s.vmc_port = self.vmc_port.value()
