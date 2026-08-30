@@ -145,6 +145,9 @@ class TrackerWorker:
                                               settings.finger_smoothing)
         self.body_backend = "mediapipe"  # or "nvidia"
         self._preview_enabled = True
+        self._face_calib_at: float | None = None
+        self._body_calib_at: float | None = None
+        self._calib_msg_shown = False
         self._show_camera = settings.show_camera
         self.body_retargeter.gate_enabled = settings.body_gate_enabled
         self.body_retargeter.gate_rad = np.deg2rad(settings.body_gate_deg)
@@ -163,11 +166,36 @@ class TrackerWorker:
     def set_send_legs(self, on: bool) -> None:
         self.body_retargeter.send_legs = on
 
+    CALIB_COUNTDOWN_SEC = 5.0
+
     def request_face_calibration(self) -> None:
-        self.face_pipeline.request_calibration()
+        # Countdown so the user can get into position after clicking.
+        self._face_calib_at = time.perf_counter() + self.CALIB_COUNTDOWN_SEC
 
     def request_body_calibration(self) -> None:
-        self.body_retargeter.start_calibration()
+        self._body_calib_at = time.perf_counter() + self.CALIB_COUNTDOWN_SEC
+
+    def _tick_calibration(self, now: float) -> None:
+        msgs = []
+        if self._face_calib_at is not None:
+            rem = self._face_calib_at - now
+            if rem <= 0:
+                self.face_pipeline.request_calibration()
+                self._face_calib_at = None
+            else:
+                msgs.append(f"顔キャリブレーションまで {int(rem) + 1} 秒")
+        if self._body_calib_at is not None:
+            rem = self._body_calib_at - now
+            if rem <= 0:
+                self.body_retargeter.start_calibration()
+                self._body_calib_at = None
+            else:
+                msgs.append(f"姿勢・指キャリブレーションまで {int(rem) + 1} 秒")
+        if msgs:
+            self._set_status(info=" / ".join(msgs))
+        elif self._calib_msg_shown:
+            self._set_status(info="トラッキング中")
+        self._calib_msg_shown = bool(msgs)
 
     def apply_smoothing(self) -> None:
         s = self.settings
@@ -283,6 +311,7 @@ class TrackerWorker:
                 last_fid = fid
                 now = time.perf_counter()
                 t = now - t_start
+                self._tick_calibration(now)
                 overlay = None
                 if self._preview_enabled:
                     overlay = frame.copy() if self._show_camera \

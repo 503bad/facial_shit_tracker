@@ -177,6 +177,10 @@ class BodyRetargeter:
         self._hand_reacq_t: list[float] = [0.0, 0.0]
         self._hand_was_lost: list[bool] = [True, True]
         self._grip_mode: list[bool] = [False, False]
+        # Outlier rejection: a hand whose apparent size or pointing
+        # direction jumps impossibly between consecutive frames is garbage
+        # (bad crop); it is treated as not detected for that frame.
+        self._hand_prev_geom: list[tuple | None] = [None, None]
         # Head pose fed from the face tracker (Unity space, mirror applied),
         # sent over VMC split across Neck/Head for receivers whose body
         # tracking owns the whole skeleton.
@@ -508,7 +512,29 @@ class BodyRetargeter:
         return hand_global
 
     # ------------------------------------------------------------------
+    def _reject_outlier(self, hi: int, lm, t: float):
+        if lm is None:
+            return None
+        wrist, middle_mcp = lm[0], lm[9]
+        size = float(np.linalg.norm(middle_mcp - wrist))
+        d = normalize(np.asarray(middle_mcp - wrist, dtype=np.float64))
+        prev = self._hand_prev_geom[hi]
+        ok = True
+        if prev is not None and size > 1e-6:
+            t_prev, size_prev, d_prev = prev
+            if t - t_prev < 0.25 and size_prev > 1e-6:
+                ratio = size / size_prev
+                turn = angle_between(d, d_prev)
+                if ratio > 1.6 or ratio < 0.6 or turn > np.deg2rad(70):
+                    ok = False
+        if ok:
+            self._hand_prev_geom[hi] = (t, size, d)
+            return lm
+        return None
+
     def _solve_fingers(self, left_hand, right_hand, t: float):
+        left_hand = self._reject_outlier(0, left_hand, t)
+        right_hand = self._reject_outlier(1, right_hand, t)
         angles = self._finger_angles.copy()
         splay = self._splay_angles.copy()
         for hi, (side, lm) in enumerate((("Left", left_hand),
@@ -590,9 +616,13 @@ class BodyRetargeter:
         """Hold -> relax on loss; blend in on re-acquisition."""
         bones = [f"{side}{f}{s}" for f in _FINGERS for s in _SEGMENTS]
         if tracked:
-            if self._hand_was_lost[hi] and self._hand_current[hi] is not None:
-                # start blending from the pose currently shown (held or
-                # partially relaxed), not from the last tracked sample
+            last_seen = self._hand_last_seen[hi]
+            if (self._hand_was_lost[hi] and self._hand_current[hi] is not None
+                    and last_seen is not None
+                    and t - last_seen > self.finger_lost_grace_sec):
+                # Lost long enough to have started relaxing: blend from the
+                # pose currently shown.  A single rejected frame inside the
+                # grace period resumes instantly instead.
                 self._hand_reacq_from[hi] = dict(self._hand_current[hi])
                 self._hand_reacq_t[hi] = t
             self._hand_was_lost[hi] = False

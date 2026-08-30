@@ -33,6 +33,7 @@ _VIS_NAMES = ("left_hip", "right_hip",
               "left_foot_index", "right_foot_index")
 
 _CONV = np.array([-1.0, -1.0, -1.0])
+_MAX_WRIST_DIST = 0.12   # normalized image units, hand wrist vs pose wrist
 
 
 def _to_unity(landmarks) -> np.ndarray:
@@ -68,7 +69,7 @@ class MediaPipeBodyTracker:
             running_mode=vision.RunningMode.VIDEO,
             min_face_detection_confidence=0.3,
             min_pose_detection_confidence=0.5,
-            min_hand_landmarks_confidence=0.4,
+            min_hand_landmarks_confidence=0.6,
         )
         self._landmarker = vision.HolisticLandmarker.create_from_options(opts)
         self._ts_ms = 0
@@ -160,6 +161,13 @@ class MediaPipeBodyTracker:
             dl = (w0.x - lw.x) ** 2 + (w0.y - lw.y) ** 2
             dr = (w0.x - rw.x) ** 2 + (w0.y - rw.y) ** 2
             return dl, dr
+
+        # A hand whose wrist is far from both pose wrists is a bad crop
+        # (edge of frame, fast motion): treat it as not detected.
+        candidates = [c for c in candidates
+                      if min(dists(c)) <= _MAX_WRIST_DIST ** 2]
+        if not candidates:
+            return None, None
 
         if len(candidates) == 1:
             dl, dr = dists(candidates[0])
