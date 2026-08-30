@@ -67,8 +67,12 @@ class MediaPipeBodyTracker:
         if not MODEL_PATH.exists():
             raise FileNotFoundError(
                 f"MediaPipeモデルがありません: {MODEL_PATH}")
+        # Pass the model as a buffer: MediaPipe's C++ file loader cannot
+        # open paths containing non-ASCII characters on Windows (e.g. a
+        # Japanese desktop folder), while Python reads them fine.
+        model_bytes = MODEL_PATH.read_bytes()
         opts = vision.HolisticLandmarkerOptions(
-            base_options=tp.BaseOptions(model_asset_path=str(MODEL_PATH)),
+            base_options=tp.BaseOptions(model_asset_buffer=model_bytes),
             running_mode=vision.RunningMode.VIDEO,
             min_face_detection_confidence=0.3,
             min_pose_detection_confidence=0.5,

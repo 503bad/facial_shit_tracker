@@ -5,4 +5,4 @@ compatible) sent in iFacialMocap v1 format; upper-body tracking via NVIDIA
 Body Pose Estimation sent over the VMC protocol.
 """
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
