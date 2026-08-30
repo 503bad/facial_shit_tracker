@@ -97,10 +97,16 @@ class MainWindow(QMainWindow):
         self.camera_check.setChecked(self.settings.show_camera)
         self.camera_check.toggled.connect(self._set_show_camera)
         checks.addWidget(self.camera_check)
-        self.interp_check = QCheckBox(
-            f"{self.settings.output_fps}FPS補間出力（僅かな遅延・要再開）")
-        self.interp_check.setChecked(self.settings.output_interp)
-        checks.addWidget(self.interp_check)
+        checks.addWidget(QLabel("補間出力:"))
+        self.interp_combo = QComboBox()
+        self.interp_combo.addItem("OFF（直接送信）", 0)
+        self.interp_combo.addItem("30FPS（僅かな遅延）", 30)
+        self.interp_combo.addItem("60FPS（僅かな遅延）", 60)
+        cur = self.settings.output_fps if self.settings.output_interp else 0
+        idx = self.interp_combo.findData(cur)
+        self.interp_combo.setCurrentIndex(max(0, idx))
+        self.interp_combo.setToolTip("変更はトラッキング再開時に反映されます")
+        checks.addWidget(self.interp_combo)
         left.addLayout(checks)
         layout.addLayout(left, 2)
 
@@ -263,7 +269,10 @@ class MainWindow(QMainWindow):
         s.face_host = self.face_host.text().strip() or "127.0.0.1"
         s.face_port = self.face_port.value()
         s.face_output = self.face_output_combo.currentData() or "ifm"
-        s.output_interp = self.interp_check.isChecked()
+        fps = int(self.interp_combo.currentData() or 0)
+        s.output_interp = fps > 0
+        if fps > 0:
+            s.output_fps = fps
         s.eye_mode = self.eye_mode_combo.currentData() or "bone"
         s.body_enabled = self.body_group.isChecked()
         s.vmc_host = self.vmc_host.text().strip() or "127.0.0.1"
