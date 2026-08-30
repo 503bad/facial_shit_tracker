@@ -8,8 +8,10 @@ then:
 - locks the planted foot's XZ (hips XZ solved so it does not slide;
   switching feet uses the FK position at the switch, so no jumps),
 - flattens the planted foot's sole (yaw-only foot rotation),
-- falls back to the image-based hips translation when no foot is planted,
-  and gently re-centres toward it while standing still to bound drift.
+- never snaps to the image-based hips translation: while airborne or
+  standing still on both feet it only bleeds toward it slowly (bounds
+  drift without pops); stance detection has hysteresis and the per-frame
+  hips XZ change is capped as a last safety.
 
 Only rotations of the two Foot bones and the Hips translation are
 modified; everything else passes through untouched.
@@ -41,9 +43,12 @@ def _q(rotations: dict, name: str) -> np.ndarray:
 
 class GroundSolver:
     def __init__(self) -> None:
-        self.plant_height_m = 0.06     # ankle height diff above the other
-        self.plant_speed_mps = 0.5     # ankle speed below which it can plant
+        self.plant_height_m = 0.06     # enter stance: ankle height diff below
+        self.plant_speed_mps = 0.5     # enter stance: ankle speed below
+        self.unplant_height_m = 0.10   # leave stance: height diff above
+        self.unplant_speed_mps = 0.9   # leave stance: speed above
         self.recenter_rate = 0.15      # 1/s pull toward the image estimate
+        self.max_step_m = 0.05         # hips XZ change per frame (safety)
         self.flatten_blend_sec = 0.15
         self._lock: dict[str, np.ndarray | None] = {"Left": None, "Right": None}
         self._planted: dict[str, bool] = {"Left": False, "Right": False}
@@ -82,8 +87,17 @@ class GroundSolver:
         if prev is not None and t - prev[0] > 1e-3:
             speed = float(np.linalg.norm(a - prev[1]) / (t - prev[0]))
         self._prev_ankle[side] = (t, np.asarray(a, dtype=np.float64))
-        lifted = float(a[1] - o[1]) > self.plant_height_m
-        return (not lifted) and speed < self.plant_speed_mps
+        height = float(a[1] - o[1])
+        # hysteresis: harder to enter than to stay, so a brief speed or
+        # height blip does not toggle the stance
+        if self._planted[side]:
+            stay = (height <= self.unplant_height_m
+                    and speed <= self.unplant_speed_mps)
+            self._planted[side] = stay
+        else:
+            self._planted[side] = (height <= self.plant_height_m
+                                   and speed <= self.plant_speed_mps)
+        return self._planted[side]
 
     # ------------------------------------------------------------------
     def solve(self, rotations: dict, hips_delta: np.ndarray, offsets: dict,
@@ -134,27 +148,37 @@ class GroundSolver:
             elif self._lock[s] is None:
                 self._lock[s] = toes[s][[0, 2]].copy()
 
+        prev_xz = (np.array(self._hips_xz) if self._hips_xz is not None
+                   else np.array([delta[0], delta[2]]))
         if self._dominant is not None:
             lock = self._lock[self._dominant]
             cur = toes[self._dominant][[0, 2]]
             shift = lock - cur
             delta[0] += shift[0]
             delta[2] += shift[1]
-            # both feet planted and still: bleed toward the image estimate
-            if all(planted.values()) and dt > 0:
-                k = min(1.0, self.recenter_rate * dt)
-                target = np.array([hips_delta[0], hips_delta[2]])
-                cur_xz = np.array([delta[0], delta[2]])
-                new_xz = cur_xz + (target - cur_xz) * k
-                move = new_xz - cur_xz
-                delta[0] += move[0]
-                delta[2] += move[1]
-                for s in ("Left", "Right"):
-                    if self._lock[s] is not None:
-                        self._lock[s] = self._lock[s] + move
-            self._hips_xz = (delta[0], delta[2])
-        else:
-            self._hips_xz = None  # airborne: follow the image estimate
+        # Bleed toward the image estimate while standing still on both
+        # feet or while airborne - never snap to it (that was the pop).
+        if (all(planted.values()) or self._dominant is None) and dt > 0:
+            k = min(1.0, self.recenter_rate * dt)
+            target = np.array([hips_delta[0], hips_delta[2]])
+            cur_xz = np.array([delta[0], delta[2]])
+            move = (target - cur_xz) * k
+            delta[0] += move[0]
+            delta[2] += move[1]
+            for s in ("Left", "Right"):
+                if self._lock[s] is not None:
+                    self._lock[s] = self._lock[s] + move
+        # safety: cap the per-frame hips XZ change so any residual
+        # discontinuity becomes a short slide instead of a pop
+        step = np.array([delta[0], delta[2]]) - prev_xz
+        n = float(np.linalg.norm(step))
+        if n > self.max_step_m:
+            step = step * (self.max_step_m / n)
+            delta[0] = prev_xz[0] + step[0]
+            delta[2] = prev_xz[1] + step[1]
+            # locks are left as they are: the planted foot slides for this
+            # frame and the hips finish converging on the next ones
+        self._hips_xz = (delta[0], delta[2])
 
         # --- flatten planted feet (yaw-only sole) ---------------------
         out = dict(rotations)
