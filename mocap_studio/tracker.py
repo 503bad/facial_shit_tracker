@@ -152,6 +152,7 @@ class TrackerWorker:
         self.body_retargeter.gate_enabled = settings.body_gate_enabled
         self.body_retargeter.gate_rad = np.deg2rad(settings.body_gate_deg)
         self.body_retargeter.send_legs = settings.send_legs
+        self.body_retargeter.ground_mode = settings.ground_mode
 
     # -- GUI-facing controls (thread-safe by value assignment) ----------
     def set_preview_enabled(self, on: bool) -> None:
@@ -165,6 +166,10 @@ class TrackerWorker:
 
     def set_send_legs(self, on: bool) -> None:
         self.body_retargeter.send_legs = on
+
+    def set_ground_mode(self, on: bool) -> None:
+        self.body_retargeter.ground_mode = on
+        self.body_retargeter.reset_ground()
 
     CALIB_COUNTDOWN_SEC = 5.0
 

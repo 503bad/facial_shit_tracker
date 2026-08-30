@@ -205,6 +205,10 @@ class MainWindow(QMainWindow):
         self.legs_check.setChecked(self.settings.send_legs)
         self.legs_check.toggled.connect(self._set_send_legs)
         body_form.addRow(self.legs_check)
+        self.ground_check = QCheckBox("接地IK（脚ON時：浮き・滑りを防ぎ足裏を床に固定）")
+        self.ground_check.setChecked(self.settings.ground_mode)
+        self.ground_check.toggled.connect(self._set_ground)
+        body_form.addRow(self.ground_check)
         vrm_row = QHBoxLayout()
         self.vrm_label = QLabel("（未読込：内蔵デフォルト使用）")
         self.vrm_label.setWordWrap(True)
@@ -256,6 +260,10 @@ class MainWindow(QMainWindow):
     def _set_gate(self, on: bool) -> None:
         self.settings.body_gate_enabled = on
         self.worker.set_gate_enabled(on)
+
+    def _set_ground(self, on: bool) -> None:
+        self.settings.ground_mode = on
+        self.worker.set_ground_mode(on)
 
     def _set_send_legs(self, on: bool) -> None:
         self.settings.send_legs = on

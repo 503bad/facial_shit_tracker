@@ -18,6 +18,7 @@ from .retarget import (IDENTITY, angle_between, frame_rotation, normalize,
                        quat_from_two_vectors, quat_inv, quat_mul,
                        twist_angle)
 from .smoothing import QuaternionSmoother, SmoothedChannels, quat_slerp
+from .ground import GroundSolver
 
 # T-pose reference directions in Unity space.
 _REF_UP = np.array([0.0, 1.0, 0.0])
@@ -212,6 +213,9 @@ class BodyRetargeter:
         # the arms, relative to a calibrated neutral so a seated pose reads
         # as rest.  Only sent when the leg joints are actually visible.
         self.send_legs = False
+        # Ground contact / foot lock (legs on): off = untouched FK output.
+        self.ground_mode = False
+        self._ground = GroundSolver()
         self._leg_neutral: dict[str, np.ndarray] = {}
         # Pelvis (Hips) is pinned to identity in seated mode; with legs on
         # it is driven from the hip line so whole-body turns go into Hips
@@ -227,7 +231,11 @@ class BodyRetargeter:
         self._hips_pos_smoother = SmoothedChannels(body_strength)
         self._leg_samples: dict[str, int] = {}
 
+    def reset_ground(self) -> None:
+        self._ground.reset()
+
     def start_calibration(self) -> None:
+        self._ground.reset()
         """Re-capture the neutral torso pose and, for any hand that is
         visible during the capture window, the relaxed finger rest angles.
         The user should sit relaxed with open hands in view."""
@@ -300,6 +308,9 @@ class BodyRetargeter:
         rotations = self._apply_gate(rotations)
         if self._eye_quats:  # gaze is subtle - keep it out of the gate
             rotations.update(self._eye_quats)
+        if self.ground_mode and self.send_legs and pose is not None:
+            hips_delta, rotations = self._ground.solve(
+                rotations, hips_delta, self.bone_offsets, pose, t)
 
         bones: dict[str, tuple[tuple, tuple]] = {}
         for bone, offset in self.bone_offsets.items():
