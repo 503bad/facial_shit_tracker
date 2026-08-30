@@ -76,8 +76,9 @@ def _interp_bones(a: dict, b: dict, u: float) -> dict:
         if name in b:
             pos_b, q_b = b[name]
             q = quat_slerp(np.asarray(q_a), np.asarray(q_b), u)
-            out[name] = (pos_b, (float(q[0]), float(q[1]),
-                                 float(q[2]), float(q[3])))
+            pos = _lerp_tuple(pos_a, pos_b, u)  # Hips translation moves
+            out[name] = (pos, (float(q[0]), float(q[1]),
+                               float(q[2]), float(q[3])))
     return out
 
 
@@ -122,7 +123,7 @@ class _Stream:
         names = sorted({n for _, s in win for n in s})
         idx = {n: i for i, n in enumerate(names)}
         n, k = len(win), len(names)
-        X = np.full((n, k, 4), np.nan)
+        X = np.full((n, k, 7), np.nan)   # quat (4) + position (3)
         dts = np.array([dt for dt, _ in win])
         nearest = int(np.argmin(np.abs(dts)))
         ref = win[nearest][1]
@@ -131,16 +132,16 @@ class _Stream:
                 qv = np.asarray(q, dtype=np.float64)
                 if name in ref and float(np.dot(qv, ref[name][1])) < 0:
                     qv = -qv  # hemisphere-align to the reference sample
-                X[si, idx[name]] = qv
-        out = _robust_kernel_mean(dts, X.reshape(n, k * 4),
-                                  self.lookahead / 2.0).reshape(k, 4)
+                X[si, idx[name], :4] = qv
+                X[si, idx[name], 4:] = np.asarray(pos, dtype=np.float64)
+        out = _robust_kernel_mean(dts, X.reshape(n, k * 7),
+                                  self.lookahead / 2.0).reshape(k, 7)
         result = {}
         for name in names:
-            q = out[idx[name]]
+            q = out[idx[name], :4]
             nrm = np.linalg.norm(q)
             q = q / nrm if nrm > 1e-9 else np.array([0.0, 0.0, 0.0, 1.0])
-            pos = ref[name][0] if name in ref else next(
-                s[name][0] for _, s in win if name in s)
+            pos = tuple(float(v) for v in out[idx[name], 4:])
             result[name] = (pos, (float(q[0]), float(q[1]),
                                   float(q[2]), float(q[3])))
         return result
