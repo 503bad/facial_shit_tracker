@@ -24,6 +24,8 @@ class Settings:
     face_enabled: bool = True
     face_host: str = "127.0.0.1"
     face_port: int = 49983
+    face_output: str = "ifm"             # "ifm" | "vmc" | "both"
+    eye_mode: str = "bone"               # VMC eyes: "bone" | "morph" | "both"
     face_smoothing: float = 0.3          # expression blendshapes
     head_smoothing: float = 0.35         # head pose
 
@@ -42,6 +44,10 @@ class Settings:
     # Send rate limits (Hz)
     face_send_rate: int = 60
     body_send_rate: int = 60
+    # Output-stage interpolation: resample all streams at output_fps with
+    # a small adaptive delay (no change to tracking when off).
+    output_interp: bool = False
+    output_fps: int = 60
 
     # Optional VRM model for accurate bone bind offsets in VMC output
     vrm_model_path: str = ""

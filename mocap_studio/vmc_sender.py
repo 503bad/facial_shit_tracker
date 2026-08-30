@@ -31,6 +31,7 @@ FINGER_BONES = [
 ]
 
 _MAX_BONES_PER_BUNDLE = 20  # keep each UDP packet under ~1500 bytes
+_MAX_BLENDS_PER_BUNDLE = 30
 
 
 def _bone_msg(name: str, pos, quat) -> OscMessageBuilder:
@@ -57,6 +58,25 @@ class VmcSender:
             self._client = SimpleUDPClient(host, port)
             self.host = host
             self.port = port
+
+    def send_blendshapes(self, values: dict[str, float]) -> None:
+        """Send /VMC/Ext/Blend/Val for every entry, then /VMC/Ext/Blend/Apply.
+
+        Names are sent verbatim (e.g. ARKit "eyeBlinkLeft" for Perfect Sync
+        receivers that match morph-target names, such as VRM4U).
+        """
+        items = list(values.items())
+        for i in range(0, len(items), _MAX_BLENDS_PER_BUNDLE):
+            bundle = OscBundleBuilder(IMMEDIATELY)
+            for name, v in items[i:i + _MAX_BLENDS_PER_BUNDLE]:
+                m = OscMessageBuilder("/VMC/Ext/Blend/Val")
+                m.add_arg(name, "s")
+                m.add_arg(float(max(0.0, min(1.0, v))), "f")
+                bundle.add_content(m.build())
+            self._client.send(bundle.build())
+        tail = OscBundleBuilder(IMMEDIATELY)
+        tail.add_content(OscMessageBuilder("/VMC/Ext/Blend/Apply").build())
+        self._client.send(tail.build())
 
     def send_frame(self, bones: dict[str, tuple[tuple, tuple]],
                    root_pos=(0.0, 0.0, 0.0),

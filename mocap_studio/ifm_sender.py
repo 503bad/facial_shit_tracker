@@ -35,6 +35,17 @@ IFM_BLENDSHAPES = [
 ]
 
 
+def ifm_to_arkit(name: str) -> str:
+    """iFacialMocap key ("mouthSmile_L") -> ARKit blendshape name
+    ("mouthSmileLeft"), the morph-target naming used by Perfect Sync
+    models and matched by VMC receivers such as VRM4U."""
+    if name.endswith("_L"):
+        return name[:-2] + "Left"
+    if name.endswith("_R"):
+        return name[:-2] + "Right"
+    return name
+
+
 def build_packet(blendshapes: dict[str, float],
                  head_euler_deg: tuple[float, float, float],
                  head_pos_m: tuple[float, float, float],
