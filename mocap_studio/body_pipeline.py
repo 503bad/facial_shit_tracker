@@ -185,6 +185,12 @@ class BodyRetargeter:
         # as rest.  Only sent when the leg joints are actually visible.
         self.send_legs = False
         self._leg_neutral: dict[str, np.ndarray] = {}
+        # Pelvis (Hips) is pinned to identity in seated mode; with legs on
+        # it is driven from the hip line so whole-body turns go into Hips
+        # (and the legs follow) instead of overloading the spine.
+        self._hips_neutral: np.ndarray | None = None
+        self._hips_samples = 0
+        self._hips_raw = IDENTITY.copy()
         self._leg_samples: dict[str, int] = {}
 
     def start_calibration(self) -> None:
@@ -201,6 +207,8 @@ class BodyRetargeter:
         self._head_samples = 0
         self._leg_neutral = {}
         self._leg_samples = {}
+        self._hips_neutral = None
+        self._hips_samples = 0
 
     def set_bone_offsets(
             self, offsets: dict[str, tuple[float, float, float]]) -> None:
@@ -282,8 +290,9 @@ class BodyRetargeter:
             if (vis.get(f"{side}_knee", 1.0) < _LEG_VIS_MIN
                     or vis.get(f"{side}_ankle", 1.0) < _LEG_VIS_MIN):
                 continue
-            upper_local = quat_from_two_vectors(_REF_LEG, normalize(knee - hip))
-            upper_g = upper_local
+            hips_g = self._hips_raw
+            upper_local = _swing_in_parent(hips_g, _REF_LEG, knee - hip)
+            upper_g = quat_mul(hips_g, upper_local)
             lower_local = _swing_in_parent(upper_g, _REF_LEG, ankle - knee)
             lower_g = quat_mul(upper_g, lower_local)
             chain = [(f"{cap}UpperLeg", upper_local, hip),
@@ -330,11 +339,33 @@ class BodyRetargeter:
         chest_out = quat_mul(chest_raw, quat_inv(self._chest_neutral)) \
             if self._chest_neutral is not None else IDENTITY.copy()
 
+        torso_rel = chest_out
+        self._hips_raw = IDENTITY.copy()
+        if self.send_legs:
+            # Pelvis frame: hip line (exact) + torso up (orthogonalized).
+            hip_line = normalize(rh - lh)
+            hips_raw = frame_rotation((_REF_SHOULDER_LINE, _REF_UP),
+                                      (hip_line, torso_up))
+            if self._hips_samples < self._CALIB_FRAMES:
+                if self._hips_neutral is None:
+                    self._hips_neutral = hips_raw.copy()
+                else:
+                    self._hips_neutral = quat_slerp(
+                        self._hips_neutral, hips_raw,
+                        1.0 / (self._hips_samples + 1))
+                self._hips_samples += 1
+            hips_out = quat_mul(hips_raw, quat_inv(self._hips_neutral))                 if self._hips_neutral is not None else IDENTITY.copy()
+            rot["Hips"] = hips_out
+            self._hips_raw = hips_raw
+            # Spine/Chest carry only the shoulders' rotation relative to
+            # the pelvis; a whole-body turn lands in Hips instead.
+            torso_rel = quat_mul(quat_inv(hips_out), chest_out)
+
         # Distribute torso rotation over Spine and Chest (half each, as a
         # quaternion "square root" via slerp from identity).
-        half = quat_slerp(IDENTITY, chest_out, 0.5)
+        half = quat_slerp(IDENTITY, torso_rel, 0.5)
         rot["Spine"] = half
-        rot["Chest"] = quat_mul(quat_inv(half), chest_out)
+        rot["Chest"] = quat_mul(quat_inv(half), torso_rel)
         # Arm-swing math stays in the RAW (measured) chest frame so arms
         # remain correct relative to the real torso.
         chest_global = chest_raw
