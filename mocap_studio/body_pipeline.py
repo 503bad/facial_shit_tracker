@@ -181,6 +181,12 @@ class BodyRetargeter:
         # direction jumps impossibly between consecutive frames is garbage
         # (bad crop); it is treated as not detected for that frame.
         self._hand_prev_geom: list[tuple | None] = [None, None]
+        # Palm-normal continuity per side: (t, normal) of the last accepted
+        # frame, used to keep the SVD normal's sign consistent through
+        # edge-on views and to reject impossible one-frame flips.
+        self._palm_prev: list[tuple | None] = [None, None]
+        self.wrist_cone_deg = 75.0      # max hand-vs-forearm angle
+        self.palm_pose_weight = 0.4     # blend weight of the pose-model prior
         # Same hold/relax/blend-in treatment for the wrist orientation and
         # the forearm twist, so losing/regaining the hand never snaps the
         # arm chain.  Per side: last tracked, currently shown, timing.
@@ -510,7 +516,7 @@ class BodyRetargeter:
             lower_g = quat_mul(upper_g, lower_local)
 
             hand_g = self._hand_orientation(side, hand_lm, ref, lower_g,
-                                            wr, el)
+                                            wr, el, p, t)
             hi = 0 if side == "left" else 1
             if hand_g is not None:
                 local_raw = quat_mul(quat_inv(lower_g), hand_g)
@@ -540,25 +546,72 @@ class BodyRetargeter:
             rot[f"{cap}LowerArm"] = lower_local
         return rot
 
-    def _hand_orientation(self, side: str, hand_lm, ref, lower_g, wr, el):
+    def _hand_orientation(self, side: str, hand_lm, ref, lower_g, wr, el,
+                          p: dict | None = None, t: float = 0.0):
+        """Wrist orientation from the hand landmarks, made robust:
+
+        - palm normal = SVD plane fit over all 21 points (the 3-point cross
+          product only seeds the sign); sign is then carried by temporal
+          continuity so edge-on views do not flip it
+        - the pose model's coarse hand points (wrist/index/pinky) are
+          blended in as a stable prior for direction and normal
+        - the hand direction is clamped to an anatomical cone around the
+          forearm; an impossible one-frame normal flip rejects the frame
+        """
         if hand_lm is None:
             return None
+        hi = 0 if side == "left" else 1
         wrist = hand_lm[0]
-        middle_mcp = hand_lm[9]
-        index_mcp = hand_lm[5]
-        little_mcp = hand_lm[17]
-        hand_dir = normalize(middle_mcp - wrist)
-        # Palm normal, pointing out of the palm (T-pose palms face down, -Y).
-        # Verified for Unity LH space: left hand palm-down has index_mcp on
-        # +Z of little_mcp, so cross(index, little) (algebraic formula)
-        # points -Y; mirrored for the right hand.
-        if side == "left":
-            palm = normalize(np.cross(index_mcp - wrist, little_mcp - wrist))
-        else:
-            palm = normalize(np.cross(little_mcp - wrist, index_mcp - wrist))
-        hand_global = frame_rotation(
-            (ref, np.array([0.0, -1.0, 0.0])), (hand_dir, palm))
-        return hand_global
+        index_mcp, middle_mcp, little_mcp = hand_lm[5], hand_lm[9], hand_lm[17]
+        pts = np.asarray(hand_lm, dtype=np.float64)
+
+        # direction: mean of the three central knuckles (less jitter)
+        hand_dir = normalize((index_mcp + middle_mcp + little_mcp) / 3.0
+                             - wrist)
+
+        # normal: plane fit; seed sign from the 3-point cross product
+        cross = (np.cross(index_mcp - wrist, little_mcp - wrist) if side == "left"
+                 else np.cross(little_mcp - wrist, index_mcp - wrist))
+        centred = pts - pts.mean(axis=0)
+        _, _, vt = np.linalg.svd(centred, full_matrices=False)
+        normal = vt[-1]
+        prev = self._palm_prev[hi]
+        if prev is not None and t - prev[0] < 0.25 and abs(
+                float(np.dot(normal, prev[1]))) > 0.3:
+            if float(np.dot(normal, prev[1])) < 0:
+                normal = -normal
+        elif float(np.dot(normal, cross)) < 0:
+            normal = -normal
+
+        # pose-model prior (coarse but temporally stable)
+        if p is not None and f"{side}_index" in p and f"{side}_pinky" in p:
+            pw, pi, pk = p[f"{side}_wrist"], p[f"{side}_index"], p[f"{side}_pinky"]
+            dir_pose = normalize((pi + pk) / 2.0 - pw)
+            n_pose = (np.cross(pi - pw, pk - pw) if side == "left"
+                      else np.cross(pk - pw, pi - pw))
+            if np.linalg.norm(n_pose) > 1e-9 and np.linalg.norm(dir_pose) > 1e-9:
+                n_pose = normalize(n_pose)
+                w = self.palm_pose_weight
+                hand_dir = normalize((1 - w) * hand_dir + w * dir_pose)
+                normal = normalize((1 - w) * normal + w * n_pose)
+
+        # reject an impossible flip (normal turned > 120 deg in one frame)
+        if prev is not None and t - prev[0] < 0.25 and angle_between(
+                normal, prev[1]) > np.deg2rad(120):
+            return None
+
+        # anatomical cone: the hand cannot bend more than ~75 deg off the
+        # forearm axis; pull it back onto the cone if it does
+        forearm = normalize(np.asarray(wr - el, dtype=np.float64))
+        ang = angle_between(hand_dir, forearm)
+        limit = np.deg2rad(self.wrist_cone_deg)
+        if ang > limit and ang < np.pi - 1e-3:
+            axis = normalize(np.cross(forearm, hand_dir))
+            hand_dir = _rotate_vec(quat_from_axis_angle(axis, limit), forearm)
+
+        self._palm_prev[hi] = (t, normal)
+        return frame_rotation((ref, np.array([0.0, -1.0, 0.0])),
+                              (hand_dir, normal))
 
     # ------------------------------------------------------------------
     def _reject_outlier(self, hi: int, lm, t: float):
