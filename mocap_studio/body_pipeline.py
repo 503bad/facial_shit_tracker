@@ -181,6 +181,11 @@ class BodyRetargeter:
         # direction jumps impossibly between consecutive frames is garbage
         # (bad crop); it is treated as not detected for that frame.
         self._hand_prev_geom: list[tuple | None] = [None, None]
+        # Same hold/relax/blend-in treatment for the wrist orientation and
+        # the forearm twist, so losing/regaining the hand never snaps the
+        # arm chain.  Per side: last tracked, currently shown, timing.
+        self._handpose = [dict(seen=None, last=None, cur=None, was_lost=True,
+                               frm=None, frm_t=0.0) for _ in range(2)]
         # Head pose fed from the face tracker (Unity space, mirror applied),
         # sent over VMC split across Neck/Head for receivers whose body
         # tracking owns the whole skeleton.
@@ -269,8 +274,10 @@ class BodyRetargeter:
 
         hips_delta = np.zeros(3)
         if pose is not None:
+            left_hand = self._reject_outlier(0, left_hand, t)
+            right_hand = self._reject_outlier(1, right_hand, t)
             rotations.update(self._solve_torso_and_arms(
-                pose, left_hand, right_hand))
+                pose, left_hand, right_hand, t))
             if self.send_legs:
                 rotations.update(self._solve_legs(pose))
                 hips_delta = self._solve_hips_translation(pose, t)
@@ -280,6 +287,9 @@ class BodyRetargeter:
             rotations[bone] = self._smooth(bone, q, t)
 
         rotations.update(self._solve_head())
+        if pose is None:
+            left_hand = self._reject_outlier(0, left_hand, t)
+            right_hand = self._reject_outlier(1, right_hand, t)
         rotations.update(self._solve_fingers(left_hand, right_hand, t))
         rotations = self._apply_gate(rotations)
         if self._eye_quats:  # gaze is subtle - keep it out of the gate
@@ -383,8 +393,40 @@ class BodyRetargeter:
         return rot
 
     # ------------------------------------------------------------------
+    def _filter_hand_pose(self, hi: int, tracked: bool, q_raw, tw_raw,
+                          t: float):
+        """Hold -> relax -> blend-in for (wrist local quat, twist angle)."""
+        st = self._handpose[hi]
+        grace, relax, reacq = (self.finger_lost_grace_sec,
+                               self.finger_relax_sec,
+                               self.finger_reacquire_sec)
+        if tracked:
+            if (st["was_lost"] and st["cur"] is not None
+                    and st["seen"] is not None and t - st["seen"] > grace):
+                st["frm"], st["frm_t"] = st["cur"], t
+            st["was_lost"] = False
+            q, tw = q_raw, float(tw_raw)
+            if st["frm"] is not None:
+                w = (t - st["frm_t"]) / max(reacq, 1e-3)
+                if w >= 1.0:
+                    st["frm"] = None
+                else:
+                    q = quat_slerp(st["frm"][0], q, w)
+                    tw = st["frm"][1] + (tw - st["frm"][1]) * w
+            st["seen"], st["last"], st["cur"] = t, (q, tw), (q, tw)
+            return q, tw
+        st["was_lost"] = True
+        if st["last"] is None or st["seen"] is None:
+            return None
+        w = float(np.clip((t - st["seen"] - grace) / max(relax, 1e-3),
+                          0.0, 1.0))
+        q = quat_slerp(st["last"][0], IDENTITY, w)
+        tw = st["last"][1] * (1.0 - w)
+        st["cur"] = (q, tw)
+        return q, tw
+
     def _solve_torso_and_arms(self, p: dict[str, np.ndarray],
-                              left_hand, right_hand):
+                              left_hand, right_hand, t: float = 0.0):
         rot: dict[str, np.ndarray] = {}
         ls, rs = p["left_shoulder"], p["right_shoulder"]
         lh, rh = p["left_hip"], p["right_hip"]
@@ -469,14 +511,21 @@ class BodyRetargeter:
 
             hand_g = self._hand_orientation(side, hand_lm, ref, lower_g,
                                             wr, el)
+            hi = 0 if side == "left" else 1
             if hand_g is not None:
+                local_raw = quat_mul(quat_inv(lower_g), hand_g)
+                filt = self._filter_hand_pose(
+                    hi, True, local_raw, twist_angle(local_raw, ref), t)
+            else:
+                filt = self._filter_hand_pose(hi, False, None, None, t)
+            if filt is not None:
                 # Twist distribution: humans pronate with the whole forearm,
                 # not the wrist joint.  Take the hand's twist about the
                 # forearm axis and spread it up the chain (upper arm 25%,
                 # forearm 50%, remainder stays at the wrist), re-solving the
                 # swings so elbow/wrist positions are unchanged.
-                local_hand = quat_mul(quat_inv(lower_g), hand_g)
-                tw = twist_angle(local_hand, ref)
+                local_hand, tw = filt
+                hand_g = quat_mul(lower_g, local_hand)  # held/relaxed pose
                 fu, fl = 0.25, 0.50
                 upper_local = quat_mul(
                     upper_local, quat_from_axis_angle(ref, tw * fu))
@@ -533,8 +582,6 @@ class BodyRetargeter:
         return None
 
     def _solve_fingers(self, left_hand, right_hand, t: float):
-        left_hand = self._reject_outlier(0, left_hand, t)
-        right_hand = self._reject_outlier(1, right_hand, t)
         angles = self._finger_angles.copy()
         splay = self._splay_angles.copy()
         for hi, (side, lm) in enumerate((("Left", left_hand),
