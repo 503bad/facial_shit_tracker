@@ -19,6 +19,15 @@ from .config import Settings
 from .face_pipeline import FacePipeline
 from .ifm_sender import IfmSender, ifm_to_arkit
 from .vmc_sender import VmcSender
+from .retarget import quat_from_axis_angle, quat_mul
+
+
+def _eye_quat(pitch_deg: float, yaw_deg: float) -> np.ndarray:
+    """Unity eye-bone local rotation: X = look down (+), Y = look right (+),
+    composed in Unity's Euler order (q = Qy * Qx)."""
+    qx = quat_from_axis_angle(np.array([1.0, 0.0, 0.0]), np.deg2rad(pitch_deg))
+    qy = quat_from_axis_angle(np.array([0.0, 1.0, 0.0]), np.deg2rad(yaw_deg))
+    return quat_mul(qy, qx)
 
 # NVIDIA keypoint -> Unity conversion (X-right/Y-up/Z-toward-camera ->
 # avatar space): (-x, y, z), plus mm -> m if magnitudes suggest mm.
@@ -269,8 +278,23 @@ class TrackerWorker:
                             ifm.send(bs, head_e, head_p, reye, leye)
                         if vmc is not None and s.face_output != "ifm":
                             vmc.set_destination(s.vmc_host, s.vmc_port)
-                            vmc.send_blendshapes(
-                                {ifm_to_arkit(k): v for k, v in bs.items()})
+                            vals = {ifm_to_arkit(k): v for k, v in bs.items()}
+                            if s.eye_mode == "bone":
+                                for k in vals:
+                                    if k.startswith("eyeLook"):
+                                        vals[k] = 0.0
+                            vmc.send_blendshapes(vals)
+                            if s.eye_mode in ("bone", "both"):
+                                self.body_retargeter.set_eye_rotations(
+                                    _eye_quat(leye[0], leye[1]),
+                                    _eye_quat(reye[0], reye[1]))
+                            else:
+                                self.body_retargeter.set_eye_rotations(
+                                    None, None)
+                            if body_async is None and body_nv is None:
+                                # no body frames: send the head chain alone
+                                vmc.send_frame(
+                                    self.body_retargeter.face_bones_frame())
                         # Also drive Neck/Head over VMC (receivers whose
                         # body tracking owns the skeleton ignore iFM head).
                         self.body_retargeter.set_head_pose(

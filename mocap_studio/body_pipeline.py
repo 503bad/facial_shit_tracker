@@ -31,6 +31,7 @@ DEFAULT_BONE_OFFSETS: dict[str, tuple[float, float, float]] = {
     "Hips": (0.0, 1.0795, 0.0), "Spine": (0.0, 0.0571, 0.0),
     "Chest": (0.0, 0.0987, 0.0), "Neck": (0.0, 0.3303, 0.0),
     "Head": (0.0, 0.0715, 0.0),
+    "LeftEye": (0.0381, 0.0897, 0.0619), "RightEye": (-0.0381, 0.0897, 0.0619),
     "LeftShoulder": (0.0265, 0.3129, 0.0),
     "LeftUpperArm": (0.1866, -0.0363, 0.0),
     "LeftLowerArm": (0.2132, -0.0351, 0.0),
@@ -167,6 +168,9 @@ class BodyRetargeter:
         self._head_neutral: np.ndarray | None = None
         self._head_samples = 0
         self._NECK_SHARE = 0.35
+        # Eye bone rotations fed from the face tracker (Unity local space);
+        # None = eyes not driven over VMC.
+        self._eye_quats: dict[str, np.ndarray] | None = None
         # Micro-tremor gate: each bone trails its target by up to gate_rad,
         # so sub-threshold jitter produces zero output motion while larger
         # movements pass through without popping.
@@ -229,6 +233,8 @@ class BodyRetargeter:
         rotations.update(self._solve_head())
         rotations.update(self._solve_fingers(left_hand, right_hand, t))
         rotations = self._apply_gate(rotations)
+        if self._eye_quats:  # gaze is subtle - keep it out of the gate
+            rotations.update(self._eye_quats)
 
         bones: dict[str, tuple[tuple, tuple]] = {}
         for bone, offset in self.bone_offsets.items():
@@ -445,6 +451,24 @@ class BodyRetargeter:
         """Feed the face tracker's head quaternion (Unity space, already
         smoothed and mirrored on the face side)."""
         self._head_quat = np.asarray(quat_unity, dtype=np.float64)
+
+    def set_eye_rotations(self, left_q: np.ndarray | None,
+                          right_q: np.ndarray | None) -> None:
+        if left_q is None or right_q is None:
+            self._eye_quats = None
+        else:
+            self._eye_quats = {"LeftEye": np.asarray(left_q, dtype=np.float64),
+                               "RightEye": np.asarray(right_q, dtype=np.float64)}
+
+    def face_bones_frame(self) -> dict[str, tuple[tuple, tuple]]:
+        """Head-chain bones only (Neck/Head/eyes), for sending over VMC
+        when body tracking is off - never pins the rest of the skeleton."""
+        rot = self._solve_head()
+        if self._eye_quats:
+            rot.update(self._eye_quats)
+        return {b: (self.bone_offsets.get(b, (0.0, 0.0, 0.0)),
+                    (float(q[0]), float(q[1]), float(q[2]), float(q[3])))
+                for b, q in rot.items()}
 
     def _solve_head(self) -> dict[str, np.ndarray]:
         if self._head_quat is None:

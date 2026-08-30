@@ -25,6 +25,7 @@ class Settings:
     face_host: str = "127.0.0.1"
     face_port: int = 49983
     face_output: str = "ifm"             # "ifm" | "vmc" | "both"
+    eye_mode: str = "bone"               # VMC eyes: "bone" | "morph" | "both"
     face_smoothing: float = 0.3          # expression blendshapes
     head_smoothing: float = 0.35         # head pose
 

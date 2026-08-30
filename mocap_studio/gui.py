@@ -137,6 +137,13 @@ class MainWindow(QMainWindow):
         idx = self.face_output_combo.findData(self.settings.face_output)
         self.face_output_combo.setCurrentIndex(max(0, idx))
         face_form.addRow("表情の送信先", self.face_output_combo)
+        self.eye_mode_combo = QComboBox()
+        self.eye_mode_combo.addItem("ボーン（LeftEye/RightEye）", "bone")
+        self.eye_mode_combo.addItem("モーフ（eyeLook*）", "morph")
+        self.eye_mode_combo.addItem("両方", "both")
+        idx = self.eye_mode_combo.findData(self.settings.eye_mode)
+        self.eye_mode_combo.setCurrentIndex(max(0, idx))
+        face_form.addRow("眼球（VMC送信時）", self.eye_mode_combo)
         face_form.addRow(SmoothingSlider(
             "表情の平滑化", self.settings.face_smoothing,
             lambda v: self._set_smoothing("face_smoothing", v)))
@@ -252,6 +259,7 @@ class MainWindow(QMainWindow):
         s.face_host = self.face_host.text().strip() or "127.0.0.1"
         s.face_port = self.face_port.value()
         s.face_output = self.face_output_combo.currentData() or "ifm"
+        s.eye_mode = self.eye_mode_combo.currentData() or "bone"
         s.body_enabled = self.body_group.isChecked()
         s.vmc_host = self.vmc_host.text().strip() or "127.0.0.1"
         s.vmc_port = self.vmc_port.value()
