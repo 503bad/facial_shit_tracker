@@ -15,9 +15,12 @@ echo ==========================================================
 echo.
 
 rem ---------- 1. NVIDIA AR SDK ----------
+if defined NV_AR_SDK_PATH if exist "%NV_AR_SDK_PATH%\nvARPose.dll" goto sdk_ok
+if defined NVAR_MODEL_DIR if exist "%NVAR_MODEL_DIR%\..\nvARPose.dll" goto sdk_ok
 if exist "%ProgramFiles%\NVIDIA Corporation\NVIDIA AR SDK\nvARPose.dll" goto sdk_ok
 echo [NG] NVIDIA AR SDK not found.
 echo      Required for facial tracking (RTX GPU needed).
+echo      NOTE: the NVIDIA Broadcast app alone is NOT enough - install the SDK.
 echo      Download the "AR SDK" redistributable and install it:
 echo      https://www.nvidia.com/ja-jp/geforce/broadcasting/broadcast-sdk/resources/
 echo.

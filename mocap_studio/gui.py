@@ -7,7 +7,8 @@ import sys
 import cv2
 import numpy as np
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QCloseEvent, QImage, QPixmap
+from PySide6.QtCore import QUrl
+from PySide6.QtGui import QCloseEvent, QDesktopServices, QImage, QPixmap
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox,
                                QFileDialog, QFormLayout, QGroupBox,
                                QHBoxLayout, QLabel, QLineEdit, QMainWindow,
@@ -348,7 +349,7 @@ class MainWindow(QMainWindow):
                 self.start_btn.setText("▶ トラッキング開始")
         if st.error and not self._error_shown:
             self._error_shown = True
-            QMessageBox.critical(self, "トラッキングエラー", st.error)
+            self._show_error(st.error)
         if st.preview is not None and self.preview_check.isChecked():
             frame = st.preview
             if self.settings.mirror_preview:
@@ -361,6 +362,25 @@ class MainWindow(QMainWindow):
                 self.preview.size(), Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation)
             self.preview.setPixmap(pix)
+
+    def _show_error(self, text: str) -> None:
+        """Show a readable message; for known setup problems hide the
+        traceback and offer to open the download page."""
+        if "NvArError" in text and "NVIDIA AR SDK" in text:
+            msg = text.split("NvArError: ", 1)[-1].strip()
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Critical)
+            box.setWindowTitle("NVIDIA AR SDK が必要です")
+            box.setText(msg)
+            open_btn = box.addButton("ダウンロードページを開く",
+                                     QMessageBox.ButtonRole.ActionRole)
+            box.addButton(QMessageBox.StandardButton.Close)
+            box.exec()
+            if box.clickedButton() is open_btn:
+                from .nvar import SDK_URL
+                QDesktopServices.openUrl(QUrl(SDK_URL))
+            return
+        QMessageBox.critical(self, "トラッキングエラー", text)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._apply_settings_from_ui()

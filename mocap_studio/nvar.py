@@ -17,10 +17,48 @@ from ctypes import (POINTER, Structure, byref, c_char_p, c_float, c_int,
 
 import numpy as np
 
-SDK_DIR = os.environ.get(
-    "NV_AR_SDK_PATH",
-    r"C:\Program Files\NVIDIA Corporation\NVIDIA AR SDK")
-MODEL_DIR = os.environ.get("NVAR_MODEL_DIR", os.path.join(SDK_DIR, "models"))
+SDK_URL = ("https://www.nvidia.com/ja-jp/geforce/broadcasting/"
+           "broadcast-sdk/resources/")
+_DEFAULT_SDK_DIR = r"C:\Program Files\NVIDIA Corporation\NVIDIA AR SDK"
+
+
+def _find_sdk_dir() -> str:
+    """Locate the AR SDK: explicit env var, the installer's NVAR_MODEL_DIR,
+    the default install path, then any NVIDIA folder that ships
+    nvARPose.dll (e.g. a Maxine-branded package)."""
+    cands = []
+    env = os.environ.get("NV_AR_SDK_PATH")
+    if env:
+        cands.append(env)
+    models = os.environ.get("NVAR_MODEL_DIR")
+    if models:
+        cands.append(os.path.dirname(models.rstrip("\\/")))
+    cands.append(_DEFAULT_SDK_DIR)
+    for pf in (os.environ.get("ProgramFiles"),
+               os.environ.get("ProgramW6432"),
+               os.environ.get("ProgramFiles(x86)")):
+        if not pf:
+            continue
+        root = os.path.join(pf, "NVIDIA Corporation")
+        if os.path.isdir(root):
+            for name in sorted(os.listdir(root)):
+                if "AR SDK" in name.upper() or "MAXINE" in name.upper():
+                    cands.append(os.path.join(root, name))
+    for c in cands:
+        if c and os.path.isfile(os.path.join(c, "nvARPose.dll")):
+            return c
+    return cands[0] if env else _DEFAULT_SDK_DIR
+
+
+SDK_DIR = _find_sdk_dir()
+MODEL_DIR = os.environ.get("NVAR_MODEL_DIR") or os.path.join(SDK_DIR, "models")
+if not os.path.isdir(MODEL_DIR):
+    MODEL_DIR = os.path.join(SDK_DIR, "models")
+
+
+def sdk_available() -> bool:
+    return os.path.isfile(os.path.join(SDK_DIR, "nvARPose.dll"))
+
 
 NVCV_SUCCESS = 0
 
@@ -125,12 +163,17 @@ def _load_libs():
     global _nvcv, _nvar
     if _nvar is not None:
         return
-    if not os.path.isdir(SDK_DIR):
+    if not sdk_available():
         raise NvArError(
-            f"NVIDIA AR SDK が見つかりません: {SDK_DIR}\n"
-            "フェイシャルトラッキングには NVIDIA AR SDK（Redistributable）が必要です。\n"
-            "https://www.nvidia.com/ja-jp/geforce/broadcasting/broadcast-sdk/resources/\n"
-            "からインストールするか、別の場所なら環境変数 NV_AR_SDK_PATH を設定してください。")
+            "NVIDIA AR SDK が見つかりません。\n\n"
+            "フェイシャルトラッキングには NVIDIA AR SDK（Redistributable）の\n"
+            "インストールが必要です（RTX GPU 必須）。\n"
+            "NVIDIA Broadcast アプリだけでは動作しません。\n\n"
+            f"{SDK_URL}\n"
+            "上記ページの \"AR SDK\" をダウンロードしてインストールしてください。\n"
+            "別の場所にインストール済みなら環境変数 NV_AR_SDK_PATH に\n"
+            "そのフォルダを設定してください。\n\n"
+            f"（探した場所: {SDK_DIR}）")
     os.add_dll_directory(SDK_DIR)
     _nvcv = ctypes.CDLL(os.path.join(SDK_DIR, "NVCVImage.dll"))
     _nvar = ctypes.CDLL(os.path.join(SDK_DIR, "nvARPose.dll"))
