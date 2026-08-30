@@ -164,6 +164,19 @@ class BodyRetargeter:
         self._thumb_rest: list[np.ndarray | None] = [None, None]
         self._thumb_smoothers: dict[str, QuaternionSmoother] = {}
         self._finger_strength = finger_strength
+        # Tracking-loss handling for fingers: hold briefly, then relax
+        # toward the bind pose over relax_sec; blend back in on
+        # re-acquisition instead of snapping.  (NVIDIA grip mode is exempt.)
+        self.finger_lost_grace_sec = 0.3
+        self.finger_relax_sec = 2.0
+        self.finger_reacquire_sec = 0.3
+        self._hand_last_seen: list[float | None] = [None, None]
+        self._hand_last_rot: list[dict | None] = [None, None]
+        self._hand_current: list[dict | None] = [None, None]  # as output
+        self._hand_reacq_from: list[dict | None] = [None, None]
+        self._hand_reacq_t: list[float] = [0.0, 0.0]
+        self._hand_was_lost: list[bool] = [True, True]
+        self._grip_mode: list[bool] = [False, False]
         # Head pose fed from the face tracker (Unity space, mirror applied),
         # sent over VMC split across Neck/Head for receivers whose body
         # tracking owns the whole skeleton.
@@ -567,7 +580,52 @@ class BodyRetargeter:
                     rot[f"{side}{finger}{seg}"] = q
             if hands[side] is not None:
                 self._solve_thumb(side, hi, hands[side], rot, t)
+            if not self._grip_mode[hi]:
+                self._apply_hand_loss(side, hi, hands[side] is not None,
+                                      rot, t)
         return rot
+
+    def _apply_hand_loss(self, side: str, hi: int, tracked: bool,
+                         rot: dict[str, np.ndarray], t: float) -> None:
+        """Hold -> relax on loss; blend in on re-acquisition."""
+        bones = [f"{side}{f}{s}" for f in _FINGERS for s in _SEGMENTS]
+        if tracked:
+            if self._hand_was_lost[hi] and self._hand_current[hi] is not None:
+                # start blending from the pose currently shown (held or
+                # partially relaxed), not from the last tracked sample
+                self._hand_reacq_from[hi] = dict(self._hand_current[hi])
+                self._hand_reacq_t[hi] = t
+            self._hand_was_lost[hi] = False
+            src = self._hand_reacq_from[hi]
+            if src is not None:
+                w = (t - self._hand_reacq_t[hi]) / max(
+                    self.finger_reacquire_sec, 1e-3)
+                if w >= 1.0:
+                    self._hand_reacq_from[hi] = None
+                else:
+                    for b in bones:
+                        if b in rot and b in src:
+                            rot[b] = quat_slerp(src[b], rot[b], w)
+            self._hand_last_seen[hi] = t
+            self._hand_last_rot[hi] = {b: rot[b] for b in bones if b in rot}
+            self._hand_current[hi] = dict(self._hand_last_rot[hi])
+            return
+
+        # lost
+        self._hand_was_lost[hi] = True
+        last = self._hand_last_rot[hi]
+        if last is None or self._hand_last_seen[hi] is None:
+            return  # never tracked: leave whatever default is there
+        lost_for = t - self._hand_last_seen[hi]
+        w = (lost_for - self.finger_lost_grace_sec) / max(
+            self.finger_relax_sec, 1e-3)
+        w = float(np.clip(w, 0.0, 1.0))
+        for b in bones:
+            if b in last:
+                rot[b] = quat_slerp(last[b], IDENTITY, w)
+        self._hand_current[hi] = {b: rot[b] for b in bones if b in rot}
+        # keep last_rot as the tracked reference (do not overwrite with
+        # the decayed pose) so relax is a clean curve from the last sample
 
     # ------------------------------------------------------------------
     def _apply_gate(self, rotations: dict[str, np.ndarray]
@@ -693,6 +751,7 @@ class BodyRetargeter:
         """Fallback for backends without hand landmarks: set a uniform
         curl (0=open, 1=fist) for one hand ('Left'/'Right')."""
         hi = 0 if side == "Left" else 1
+        self._grip_mode[hi] = True
         ang = float(np.clip(curl01, 0.0, 1.0)) * np.deg2rad(80.0)
         for fi in range(5):
             for si in range(3):
