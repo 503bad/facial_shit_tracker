@@ -21,17 +21,19 @@ echo   -> %OUT%
 echo ==========================================================
 echo.
 
-if exist "%OUT%" rmdir /s /q "%OUT%"
+if exist "%OUT%\" rmdir /s /q "%OUT%"
+if exist "%OUT%" del /q "%OUT%"
 if exist "%ZIP%" del /q "%ZIP%"
-mkdir "%OUT%" 2>nul
+mkdir "%OUT%"
+if not exist "%OUT%\" goto copy_fail
 
 rem ---- application package (code + bundled MediaPipe models) ----
-robocopy "%ROOT%mocap_studio" "%OUT%\mocap_studio" /E /NFL /NDL /NJH /NJS /NP ^
-  /XD __pycache__ /XF *.pyc >nul
+robocopy "%ROOT%mocap_studio" "%OUT%\mocap_studio" /E /NFL /NDL /NJH /NJS /NP /R:2 /W:1 ^
+  /XD __pycache__ /XF *.pyc >nul 2>nul
 if errorlevel 8 goto copy_fail
 
 rem ---- docs ----
-robocopy "%ROOT%docs" "%OUT%\docs" /E /NFL /NDL /NJH /NJS /NP >nul
+robocopy "%ROOT%docs" "%OUT%\docs" /E /NFL /NDL /NJH /NJS /NP /R:2 /W:1 >nul 2>nul
 if errorlevel 8 goto copy_fail
 
 rem ---- top-level files ----
@@ -53,11 +55,13 @@ echo.
 for %%Z in ("%ZIP%") do echo [OK] %%~nxZ  (%%~zZ bytes)
 echo.
 echo Done. Distribute the zip (or the folder) in release\.
+if /i "%~1"=="/nopause" exit /b 0
 pause
 exit /b 0
 
 :copy_fail
 echo [NG] copying files failed.
+echo      If Mocap Studio is running, close it (open model files block the copy) and retry.
 pause
 exit /b 1
 
