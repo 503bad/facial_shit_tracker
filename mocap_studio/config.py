@@ -43,6 +43,10 @@ class Settings:
     # Send rate limits (Hz)
     face_send_rate: int = 60
     body_send_rate: int = 60
+    # Output-stage interpolation: resample all streams at output_fps with
+    # a small adaptive delay (no change to tracking when off).
+    output_interp: bool = False
+    output_fps: int = 60
 
     # Optional VRM model for accurate bone bind offsets in VMC output
     vrm_model_path: str = ""

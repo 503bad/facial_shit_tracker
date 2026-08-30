@@ -97,6 +97,10 @@ class MainWindow(QMainWindow):
         self.camera_check.setChecked(self.settings.show_camera)
         self.camera_check.toggled.connect(self._set_show_camera)
         checks.addWidget(self.camera_check)
+        self.interp_check = QCheckBox(
+            f"{self.settings.output_fps}FPS補間出力（僅かな遅延・要再開）")
+        self.interp_check.setChecked(self.settings.output_interp)
+        checks.addWidget(self.interp_check)
         left.addLayout(checks)
         layout.addLayout(left, 2)
 
@@ -259,6 +263,7 @@ class MainWindow(QMainWindow):
         s.face_host = self.face_host.text().strip() or "127.0.0.1"
         s.face_port = self.face_port.value()
         s.face_output = self.face_output_combo.currentData() or "ifm"
+        s.output_interp = self.interp_check.isChecked()
         s.eye_mode = self.eye_mode_combo.currentData() or "bone"
         s.body_enabled = self.body_group.isChecked()
         s.vmc_host = self.vmc_host.text().strip() or "127.0.0.1"
