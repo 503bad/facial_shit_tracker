@@ -130,6 +130,13 @@ class MainWindow(QMainWindow):
         self.face_port.setRange(1, 65535)
         self.face_port.setValue(self.settings.face_port)
         face_form.addRow("ポート", self.face_port)
+        self.face_output_combo = QComboBox()
+        self.face_output_combo.addItem("iFacialMocap形式（Warudo/VSeeFace等）", "ifm")
+        self.face_output_combo.addItem("VMC Blend/Val（VRM4U/UE5等）", "vmc")
+        self.face_output_combo.addItem("両方に送信", "both")
+        idx = self.face_output_combo.findData(self.settings.face_output)
+        self.face_output_combo.setCurrentIndex(max(0, idx))
+        face_form.addRow("表情の送信先", self.face_output_combo)
         face_form.addRow(SmoothingSlider(
             "表情の平滑化", self.settings.face_smoothing,
             lambda v: self._set_smoothing("face_smoothing", v)))
@@ -244,6 +251,7 @@ class MainWindow(QMainWindow):
         s.face_enabled = self.face_group.isChecked()
         s.face_host = self.face_host.text().strip() or "127.0.0.1"
         s.face_port = self.face_port.value()
+        s.face_output = self.face_output_combo.currentData() or "ifm"
         s.body_enabled = self.body_group.isChecked()
         s.vmc_host = self.vmc_host.text().strip() or "127.0.0.1"
         s.vmc_port = self.vmc_port.value()

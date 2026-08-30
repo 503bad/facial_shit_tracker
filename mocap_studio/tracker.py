@@ -17,7 +17,7 @@ from .body_pipeline import BodyRetargeter
 from .camera import Camera
 from .config import Settings
 from .face_pipeline import FacePipeline
-from .ifm_sender import IfmSender
+from .ifm_sender import IfmSender, ifm_to_arkit
 from .vmc_sender import VmcSender
 
 # NVIDIA keypoint -> Unity conversion (X-right/Y-up/Z-toward-camera ->
@@ -208,7 +208,8 @@ class TrackerWorker:
                                       "（初回は数十秒かかります）...")
                 from .nvar import FaceExpressionEstimator
                 face = FaceExpressionEstimator(w, h)
-                ifm = IfmSender(s.face_host, s.face_port)
+                if s.face_output in ("ifm", "both"):
+                    ifm = IfmSender(s.face_host, s.face_port)
 
             if s.body_enabled:
                 if self.body_backend == "nvidia":
@@ -220,6 +221,9 @@ class TrackerWorker:
                     self._set_status(info="MediaPipe Holistic を初期化中...")
                     from .mp_body import MediaPipeBodyTracker
                     body_mp = MediaPipeBodyTracker()
+                vmc = VmcSender(s.vmc_host, s.vmc_port)
+            if vmc is None and face is not None and s.face_output != "ifm":
+                # Perfect Sync over VMC without body tracking
                 vmc = VmcSender(s.vmc_host, s.vmc_port)
 
             self._set_status(info="トラッキング中")
@@ -250,8 +254,9 @@ class TrackerWorker:
                         else np.zeros_like(frame)
 
                 face_found = False
-                if face is not None and ifm is not None:
-                    ifm.set_destination(s.face_host, s.face_port)
+                if face is not None:
+                    if ifm is not None:
+                        ifm.set_destination(s.face_host, s.face_port)
                     self.face_pipeline.mirror = s.mirror_tracking
                     found, expr, pose_q, trans, lm = face.process(frame)
                     face_found = bool(found)
@@ -260,7 +265,12 @@ class TrackerWorker:
                         last_face_send = now
                         bs, head_e, head_p, reye, leye = \
                             self.face_pipeline.process(expr, pose_q, trans, t)
-                        ifm.send(bs, head_e, head_p, reye, leye)
+                        if ifm is not None:
+                            ifm.send(bs, head_e, head_p, reye, leye)
+                        if vmc is not None and s.face_output != "ifm":
+                            vmc.set_destination(s.vmc_host, s.vmc_port)
+                            vmc.send_blendshapes(
+                                {ifm_to_arkit(k): v for k, v in bs.items()})
                         # Also drive Neck/Head over VMC (receivers whose
                         # body tracking owns the skeleton ignore iFM head).
                         self.body_retargeter.set_head_pose(

@@ -24,6 +24,7 @@ class Settings:
     face_enabled: bool = True
     face_host: str = "127.0.0.1"
     face_port: int = 49983
+    face_output: str = "ifm"             # "ifm" | "vmc" | "both"
     face_smoothing: float = 0.3          # expression blendshapes
     head_smoothing: float = 0.35         # head pose
 
