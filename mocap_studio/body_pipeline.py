@@ -230,6 +230,12 @@ class BodyRetargeter:
         self._hips_delta = np.zeros(3)
         self._hips_pos_smoother = SmoothedChannels(body_strength)
         self._leg_samples: dict[str, int] = {}
+        # Optional stereo depth (2-camera extension): active only while
+        # the pose dict carries "_stereo_hips_z" (metres, camera-A frame).
+        # Without that key nothing below changes legacy behaviour.
+        self._stereo_z_neutral: float | None = None
+        self._stereo_z_samples = 0
+        self._stereo_z_seen = False   # decay-out latch after OFF
 
     def reset_ground(self) -> None:
         self._ground.reset()
@@ -253,6 +259,8 @@ class BodyRetargeter:
         self._hips_samples = 0
         self._hips_img_neutral = None
         self._hips_img_samples = 0
+        self._stereo_z_neutral = None
+        self._stereo_z_samples = 0
 
     def set_bone_offsets(
             self, offsets: dict[str, tuple[float, float, float]]) -> None:
@@ -295,6 +303,20 @@ class BodyRetargeter:
             if self.send_legs:
                 rotations.update(self._solve_legs(pose))
                 hips_delta = self._solve_hips_translation(pose, t)
+            elif "_stereo_hips_z" in pose or self._stereo_z_seen:
+                # Seated mode + 2-camera extension: depth-only root
+                # motion (legacy seated mode keeps the root fixed and is
+                # unaffected - this key never exists on the legacy path).
+                # When the key disappears (extension turned OFF) the
+                # delta glides back to the fixed root instead of popping.
+                self._stereo_z_seen = "_stereo_hips_z" in pose
+                raw = np.array([0.0, 0.0, self._stereo_z_delta(pose)])
+                self._hips_delta = self._hips_pos_smoother.apply(raw, t)
+                if not self._stereo_z_seen \
+                        and abs(float(self._hips_delta[2])) < 1e-3:
+                    self._hips_delta = np.zeros(3)
+                else:
+                    hips_delta = self._hips_delta
 
         # Smooth every driven rotation.
         for bone, q in rotations.items():
@@ -362,10 +384,35 @@ class BodyRetargeter:
             return self._hips_delta
         scale = torso_m / torso_img
         d = hc - self._hips_img_neutral
-        # image x right -> Unity -x ; image y down -> Unity -y
-        raw = np.array([-d[0] * aspect * scale, -d[1] * scale, 0.0])
+        # image x right -> Unity -x ; image y down -> Unity -y.  Z stays
+        # 0 unless the 2-camera extension provides measured depth.
+        raw = np.array([-d[0] * aspect * scale, -d[1] * scale,
+                        self._stereo_z_delta(p)])
         self._hips_delta = self._hips_pos_smoother.apply(raw, t)
         return self._hips_delta
+
+    def _stereo_z_delta(self, p: dict) -> float:
+        """Root depth from the optional 2-camera extension.
+
+        Returns 0.0 (exact legacy behaviour) when the pose carries no
+        "_stereo_hips_z" key.  Like the image-XY translation, depth is
+        expressed relative to a neutral captured over the calibration
+        window and re-captured by start_calibration()."""
+        z = p.get("_stereo_hips_z")
+        if z is None:
+            return 0.0
+        z = float(z)
+        if self._stereo_z_samples < self._CALIB_FRAMES:
+            n = self._stereo_z_samples
+            self._stereo_z_neutral = (
+                z if self._stereo_z_neutral is None
+                else (self._stereo_z_neutral * n + z) / (n + 1))
+            self._stereo_z_samples = n + 1
+        if self._stereo_z_neutral is None:
+            return 0.0
+        # Camera z shrinks as the user steps toward the camera; avatar
+        # forward (toward the viewer) is +Z.
+        return float(np.clip(self._stereo_z_neutral - z, -1.5, 1.5))
 
     # ------------------------------------------------------------------
     def _solve_legs(self, p: dict[str, np.ndarray]) -> dict[str, np.ndarray]:

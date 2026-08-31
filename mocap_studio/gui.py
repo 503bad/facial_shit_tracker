@@ -221,6 +221,20 @@ class MainWindow(QMainWindow):
         self.body_group = body_group
         right.addWidget(body_group)
 
+        # Optional 2-camera depth extension: fully isolated; if the
+        # stereo package cannot load, the app runs exactly as before.
+        self.stereo_panel = None
+        if self.worker.stereo_settings is not None:
+            try:
+                from .stereo.ui import StereoPanel
+                self.stereo_panel = StereoPanel(self.worker, self)
+                right.addWidget(self.stereo_panel)
+            except Exception as e:
+                warn = QLabel(f"2カメラ拡張を読み込めませんでした: {e}")
+                warn.setWordWrap(True)
+                warn.setStyleSheet("color:#c66;")
+                right.addWidget(warn)
+
         right.addStretch(1)
         note = QLabel("※ 表情は iFacialMocap 側、体・指・首・頭は VMC 側で送信\n"
                       "（頭回転は iFacialMocap にも同時送信）。\n"
@@ -335,6 +349,8 @@ class MainWindow(QMainWindow):
 
     def _poll(self) -> None:
         st = self.worker.get_status()
+        if self.stereo_panel is not None:
+            self.stereo_panel.update_status(st)
         if st.running:
             face = "😀" if st.face_found else "–"
             body = "🧍" if st.body_found else "–"
@@ -385,6 +401,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         self._apply_settings_from_ui()
         self.settings.save()
+        if self.stereo_panel is not None:
+            self.stereo_panel.save_settings()
         self.worker.stop()
         event.accept()
 

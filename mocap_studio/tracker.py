@@ -22,6 +22,14 @@ from .interp import OutputInterpolator
 from .vmc_sender import VmcSender
 from .retarget import quat_from_axis_angle, quat_mul
 
+# Optional 2-camera depth extension: import only the (tiny) settings
+# holder here; the engine itself is imported lazily when enabled.  A
+# broken/missing stereo package must never stop the app from starting.
+try:
+    from .stereo.config import StereoSettings
+except Exception:  # pragma: no cover - defensive isolation
+    StereoSettings = None
+
 
 def _eye_quat(pitch_deg: float, yaw_deg: float) -> np.ndarray:
     """Unity eye-bone local rotation: X = look down (+), Y = look right (+),
@@ -112,6 +120,11 @@ def _mirror_body(pose, lhand, rhand):
             elif k == "_img":
                 new_pose[k] = {n: ((1.0 - c[0], c[1]) if isinstance(c, tuple)
                                    else c) for n, c in v.items()}
+            elif k.startswith("_"):
+                # metadata added by optional extensions (e.g. the stereo
+                # depth key) passes through unchanged; depth is unaffected
+                # by a left-right mirror.
+                new_pose[k] = v
             else:
                 new_pose[swap(k)] = flip(v)
     new_l = flip(rhand) if rhand is not None else None
@@ -129,6 +142,9 @@ class TrackerStatus:
         self.error: str | None = None
         self.info: str = ""
         self.preview: np.ndarray | None = None  # BGR with overlay
+        # 2-camera extension (empty / False whenever the feature is off)
+        self.stereo_active = False
+        self.stereo_info: str = ""
 
 
 class TrackerWorker:
@@ -153,6 +169,12 @@ class TrackerWorker:
         self.body_retargeter.gate_rad = np.deg2rad(settings.body_gate_deg)
         self.body_retargeter.send_legs = settings.send_legs
         self.body_retargeter.ground_mode = settings.ground_mode
+        # 2-camera extension: isolated settings namespace; request flag is
+        # read by the tracking loop (safe ON/OFF while running).
+        self.stereo_settings = (StereoSettings.load()
+                                if StereoSettings is not None else None)
+        self._stereo_requested = bool(
+            self.stereo_settings.enabled) if self.stereo_settings else False
 
     # -- GUI-facing controls (thread-safe by value assignment) ----------
     def set_preview_enabled(self, on: bool) -> None:
@@ -170,6 +192,13 @@ class TrackerWorker:
     def set_ground_mode(self, on: bool) -> None:
         self.body_retargeter.ground_mode = on
         self.body_retargeter.reset_ground()
+
+    def set_stereo_enabled(self, on: bool) -> None:
+        """Independent ON/OFF for the 2-camera extension (default OFF).
+        Takes effect immediately; the loop starts/stops the engine."""
+        self._stereo_requested = bool(on)
+        if self.stereo_settings is not None:
+            self.stereo_settings.enabled = bool(on)
 
     CALIB_COUNTDOWN_SEC = 5.0
 
@@ -201,6 +230,64 @@ class TrackerWorker:
         elif self._calib_msg_shown:
             self._set_status(info="トラッキング中")
         self._calib_msg_shown = bool(msgs)
+
+    # -- 2-camera extension lifecycle (isolated; legacy path untouched) --
+    def _stereo_lifecycle(self, engine, fail_msg, cam_w: int, cam_h: int):
+        """Start/stop the stereo engine to match the request flag.
+
+        Any failure disables only the extension (with a status message)
+        and the tracker keeps running on the legacy path.  Returns the
+        updated (engine, fail_msg)."""
+        want = (self._stereo_requested and self.stereo_settings is not None
+                and self.body_backend == "mediapipe")
+        if want and engine is None and fail_msg is None:
+            try:
+                from .stereo.calibration import StereoCalibration
+                from .stereo.engine import StereoEngine
+                calib = StereoCalibration.load()
+                if calib is None:
+                    raise RuntimeError(
+                        "校正プロファイルがありません。トラッキング停止中に"
+                        "「校正...」から作成してください。")
+                engine = StereoEngine(self.stereo_settings, calib,
+                                      self.settings.camera_index,
+                                      (cam_w, cam_h))
+                engine.start()
+                self._set_status(stereo_active=True,
+                                 stereo_info="2カメラ追跡: 起動中...")
+            except Exception as e:
+                if engine is not None:
+                    try:
+                        engine.stop()
+                    except Exception:
+                        pass
+                engine = None
+                fail_msg = str(e)
+                self._set_status(
+                    stereo_active=False,
+                    stereo_info=f"2カメラ追跡を開始できません: {e}"
+                                "（従来の1カメラで動作中）")
+        elif engine is not None and (not want or engine.error is not None):
+            if engine.error is not None:
+                fail_msg = str(engine.error)
+                self._set_status(
+                    stereo_info=f"2カメラ追跡エラー: {engine.error}"
+                                "（従来の1カメラへ戻しました）")
+            else:
+                self._set_status(stereo_info="")
+            try:
+                engine.stop()
+            except Exception:
+                pass
+            engine = None
+            self._set_status(stereo_active=False)
+        if fail_msg is not None and not self._stereo_requested:
+            fail_msg = None    # OFF->ON retries after the user fixed it
+        if not want and self.body_backend != "mediapipe" \
+                and self._stereo_requested:
+            self._set_status(stereo_info="2カメラ追跡はMediaPipe"
+                                         "バックエンドでのみ使用できます")
+        return engine, fail_msg
 
     def apply_smoothing(self) -> None:
         s = self.settings
@@ -243,6 +330,7 @@ class TrackerWorker:
         ifm = None
         vmc = None
         interp = None
+        stereo_engine = None
         try:
             self._set_status(running=True, error=None,
                              info="カメラを起動中...")
@@ -310,6 +398,10 @@ class TrackerWorker:
             last_debug2d = None
             body_found = False
             l_found = r_found = False
+            # 2-camera extension state (None/unused while OFF)
+            stereo_engine = None
+            stereo_fail = None
+            last_stereo_seq = -1
 
             while not self._stop.is_set():
                 frame, fid = camera.latest()
@@ -388,10 +480,49 @@ class TrackerWorker:
                             cv2.circle(overlay, (int(x), int(y)), 1,
                                        (0, 255, 128), -1)
 
+                if vmc is not None and body_async is not None:
+                    # Optional 2-camera extension: start/stop on demand;
+                    # while active it replaces the body-observation source
+                    # (same output contract), never the legacy pipeline.
+                    prev_engine = stereo_engine
+                    stereo_engine, stereo_fail = self._stereo_lifecycle(
+                        stereo_engine, stereo_fail, w, h)
+                    if stereo_engine is not prev_engine:
+                        last_stereo_seq = -1   # new generation of results
+
                 if vmc is not None:
                     vmc.set_destination(s.vmc_host, s.vmc_port)
                     new_body = None
-                    if body_async is not None:
+                    if stereo_engine is not None:
+                        stereo_engine.set_legs_enabled(
+                            self.body_retargeter.send_legs)
+                        stereo_engine.submit_a(frame, now)
+                        res, sseq = stereo_engine.latest()
+                        if res is not None and sseq != last_stereo_seq:
+                            last_stereo_seq = sseq
+                            pose_pts, lhand, rhand, last_debug2d = res
+                            new_body = (pose_pts, lhand, rhand)
+                        if overlay is not None and last_debug2d:
+                            oh, ow = overlay.shape[:2]
+                            for x, y, kind in last_debug2d:
+                                color = {0: (0, 128, 255), 1: (255, 200, 0),
+                                         2: (0, 0, 255)}.get(kind,
+                                                             (0, 0, 255))
+                                cv2.circle(overlay,
+                                           (int(x * ow), int(y * oh)),
+                                           2, color, -1)
+                        if overlay is not None:
+                            pip = stereo_engine.get_pip()
+                            if pip is not None:
+                                ph_, pw_ = pip.shape[:2]
+                                oh, ow = overlay.shape[:2]
+                                if ph_ + 16 < oh and pw_ + 16 < ow:
+                                    overlay[oh - ph_ - 8:oh - 8,
+                                            ow - pw_ - 8:ow - 8] = pip
+                        self._set_status(stereo_active=True,
+                                         stereo_info=stereo_engine
+                                         .info_line())
+                    elif body_async is not None:
                         if body_async.error is not None:
                             raise body_async.error
                         body_async.submit(frame, int(t * 1000))
@@ -452,6 +583,12 @@ class TrackerWorker:
         finally:
             if interp is not None:
                 interp.stop()
+            try:
+                if stereo_engine is not None:
+                    stereo_engine.stop()
+            except Exception:
+                pass
+            self._set_status(stereo_active=False, stereo_info="")
             if body_async is not None:
                 body_async.stop()
             for obj, closer in ((face, "destroy"), (body_nv, "destroy"),

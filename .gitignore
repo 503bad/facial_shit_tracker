@@ -4,3 +4,6 @@ settings.json
 *.vrm
 .venv/
 release/
+stereo_settings.json
+stereo_calibration.json
+stereo_logs/
