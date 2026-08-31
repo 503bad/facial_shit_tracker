@@ -169,10 +169,23 @@ class MediaPipeBodyTracker:
             dr = (w0.x - rw.x) ** 2 + (w0.y - rw.y) ** 2
             return dl, dr
 
-        # A hand whose wrist is far from both pose wrists is a bad crop
-        # (edge of frame, fast motion): treat it as not detected.
-        candidates = [c for c in candidates
-                      if min(dists(c)) <= _MAX_WRIST_DIST ** 2]
+        # A hand whose wrist is far from every pose wrist is a bad crop
+        # (edge of frame, fast motion): treat it as not detected.  "Far"
+        # scales with the apparent hand size — a fixed threshold discarded
+        # perfectly tracked hands whenever the user sat close to the
+        # camera — and a pose wrist the pose model cannot see (occluded,
+        # out of frame) is no evidence for discarding anything.
+        def keep(norm):
+            ds = [d for d, pw in zip(dists(norm), (lw, rw))
+                  if pw.visibility >= 0.5]
+            if not ds:
+                return True
+            w0, m9 = norm[0], norm[9]
+            span = ((w0.x - m9.x) ** 2 + (w0.y - m9.y) ** 2) ** 0.5
+            limit = max(_MAX_WRIST_DIST, 1.5 * span)
+            return min(ds) <= limit * limit
+
+        candidates = [c for c in candidates if keep(c)]
         if not candidates:
             return None, None
 
